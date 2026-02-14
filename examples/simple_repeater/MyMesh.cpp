@@ -60,6 +60,16 @@
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
+#ifndef MAX_TEXT_LEN
+#define MAX_TEXT_LEN 120  // reasonable max text length for messages
+#endif
+
+static uint8_t getDataSize(uint8_t type);
+static uint32_t getMultiplier(uint8_t type);
+static bool isSigned(uint8_t type);
+static float getFloat(const uint8_t* buffer, uint8_t size, uint32_t multiplier, bool is_signed);
+static float getTelemValue(CayenneLPP& telemetry, uint8_t channel, uint8_t type);
+
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
 #if MAX_NEIGHBOURS // check if neighbours enabled
   // find existing neighbour, else use least recently updated
@@ -914,8 +924,15 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   pending_discover_tag = 0;
   pending_discover_until = 0;
-
   memset(default_scope.key, 0, sizeof(default_scope.key));
+
+  // Initialize telemetry storage
+  memset(temp_readings, 0, sizeof(temp_readings));
+  memset(pressure_readings, 0, sizeof(pressure_readings));
+  telemetry_index = 0;
+  last_telemetry_send = 0;
+  telemetry_channel_initialized = false;
+  last_sent_packets_count = 0;
 }
 
 void MyMesh::begin(FILESYSTEM *fs) {
@@ -968,6 +985,12 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if ENV_INCLUDE_GPS == 1
   applyGpsPrefs();
 #endif
+
+  // Initialize telemetry channel
+  initTelemetryChannel();
+  // Initialize packet count tracking for hourly telemetry
+  last_sent_packets_count = getNumSentFlood() + getNumSentDirect();
+  last_telemetry_send = 0;  // Force first send in loop() after delay
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size) {
@@ -1147,6 +1170,7 @@ void MyMesh::formatPacketStatsReply(char *reply) {
 }
 
 void MyMesh::saveIdentity(const mesh::LocalIdentity &new_id) {
+  self_id = new_id;
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   IdentityStore store(*_fs, "");
 #elif defined(ESP32)
@@ -1156,7 +1180,7 @@ void MyMesh::saveIdentity(const mesh::LocalIdentity &new_id) {
 #else
 #error "need to define saveIdentity()"
 #endif
-  store.save("_main", new_id);
+  store.save("_main", self_id);
 }
 
 void MyMesh::clearStats() {
@@ -1299,6 +1323,241 @@ void MyMesh::loop() {
   uint32_t now = millis();
   uptime_millis += now - last_millis;
   last_millis = now;
+
+  // Periodic telemetry: first send 30s after boot, then every 2 hours
+  uint32_t current_time = getRTCClock()->getCurrentTime();
+  if (last_telemetry_send == 0 || current_time >= last_telemetry_send + 3600) {
+    telemetry.reset();
+    telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
+    sensors.querySensors(0xFF, telemetry);
+    float temp = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE);
+    float pressure = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE);
+    if (!isnan(temp) && !isnan(pressure)) {
+      recordTelemetryReading(temp, pressure);
+    }
+    static int hour_count = 0;
+    static uint32_t first_telemetry_send_after_millis = 0;
+    if (last_telemetry_send == 0) {
+      if (first_telemetry_send_after_millis == 0) {
+        first_telemetry_send_after_millis = millis() + 30000;
+      }
+      if (millis() >= first_telemetry_send_after_millis) {
+        hour_count = 0;
+        sendTelemetryMessage();
+        last_telemetry_send = current_time;
+        last_sent_packets_count = getNumSentFlood() + getNumSentDirect();
+      }
+    } else {
+      hour_count++;
+      if (hour_count >= 2) {
+        hour_count = 0;
+        sendTelemetryMessage();
+      }
+      last_telemetry_send = current_time;
+      last_sent_packets_count = getNumSentFlood() + getNumSentDirect();
+    }
+  }
+}
+
+static uint8_t getDataSize(uint8_t type) {
+  switch (type) {
+    case LPP_GPS: return 9;
+    case LPP_POLYLINE: return 8;
+    case LPP_GYROMETER:
+    case LPP_ACCELEROMETER: return 6;
+    case LPP_GENERIC_SENSOR:
+    case LPP_FREQUENCY:
+    case LPP_DISTANCE:
+    case LPP_ENERGY:
+    case LPP_UNIXTIME: return 4;
+    case LPP_COLOUR: return 3;
+    case LPP_ANALOG_INPUT:
+    case LPP_ANALOG_OUTPUT:
+    case LPP_LUMINOSITY:
+    case LPP_TEMPERATURE:
+    case LPP_CONCENTRATION:
+    case LPP_BAROMETRIC_PRESSURE:
+    case LPP_ALTITUDE:
+    case LPP_VOLTAGE:
+    case LPP_CURRENT:
+    case LPP_DIRECTION:
+    case LPP_POWER: return 2;
+    case LPP_PRESENCE:
+    case LPP_RELATIVE_HUMIDITY: return 1;
+  }
+  return 1;
+}
+
+static uint32_t getMultiplier(uint8_t type) {
+  switch (type) {
+    case LPP_CURRENT:
+    case LPP_DISTANCE:
+    case LPP_ENERGY: return 1000;
+    case LPP_VOLTAGE:
+    case LPP_ANALOG_INPUT:
+    case LPP_ANALOG_OUTPUT: return 100;
+    case LPP_TEMPERATURE:
+    case LPP_BAROMETRIC_PRESSURE: return 10;
+    case LPP_RELATIVE_HUMIDITY:  // 1 byte, 0.5% → multiplier 2 (Cayenne LPP)
+      return 2;
+  }
+  return 1;
+}
+
+static bool isSigned(uint8_t type) {
+  return type == LPP_ALTITUDE || type == LPP_TEMPERATURE || type == LPP_GYROMETER ||
+      type == LPP_ANALOG_INPUT || type == LPP_ANALOG_OUTPUT || type == LPP_GPS || type == LPP_ACCELEROMETER;
+}
+
+static float getFloat(const uint8_t* buffer, uint8_t size, uint32_t multiplier, bool is_signed) {
+  uint32_t value = 0;
+  for (uint8_t i = 0; i < size; i++) {
+    value = (value << 8) + buffer[i];
+  }
+  int sign = 1;
+  if (is_signed) {
+    uint32_t bit = 1ul << ((size * 8) - 1);
+    if ((value & bit) == bit) {
+      value = (bit << 1) - value;
+      sign = -1;
+    }
+  }
+  return sign * ((float)value / multiplier);
+}
+
+static float getTelemValue(CayenneLPP& telemetry, uint8_t channel, uint8_t type) {
+  uint8_t* buf = telemetry.getBuffer();
+  uint8_t size = telemetry.getSize();
+  uint8_t i = 0;
+  while (i + 2 < size) {
+    uint8_t ch = buf[i++];
+    uint8_t t = buf[i++];
+    uint8_t sz = getDataSize(t);
+    if (ch == channel && t == type) {
+      return getFloat(&buf[i], sz, getMultiplier(t), isSigned(t));
+    }
+    i += sz;
+  }
+  return NAN;
+}
+
+void MyMesh::initTelemetryChannel() {
+  if (telemetry_channel_initialized) return;
+  // Create region for #telemetry if it doesn't exist
+  auto region = region_map.findByName("#telemetry");
+  if (!region) {
+    region = region_map.putRegion("#telemetry", 0);
+    if (region) {
+      region->flags &= ~REGION_DENY_FLOOD;
+    }
+  }
+  if (region) {
+    // Use the provided channel key: 170d4fb04b507fb4693c37f183a47719 (32 hex chars = 16 bytes)
+    const char* channel_key_hex = "170d4fb04b507fb4693c37f183a47719";
+    uint8_t channel_key[16];
+    if (mesh::Utils::fromHex(channel_key, 16, channel_key_hex)) {
+      memset(telemetry_channel.secret, 0, sizeof(telemetry_channel.secret));
+      memcpy(telemetry_channel.secret, channel_key, 16);
+      mesh::Utils::sha256(telemetry_channel.hash, sizeof(telemetry_channel.hash), telemetry_channel.secret, 16);
+      telemetry_channel_initialized = true;
+    } else {
+      MESH_DEBUG_PRINTLN("Failed to parse telemetry channel key");
+    }
+  }
+}
+
+void MyMesh::recordTelemetryReading(float temp, float pressure) {
+  temp_readings[telemetry_index] = temp;
+  pressure_readings[telemetry_index] = pressure;
+  telemetry_index = (telemetry_index + 1) % 24;
+}
+
+void MyMesh::calcMinMax24h(float& temp_min, float& temp_max, float& pressure_min, float& pressure_max) {
+  temp_min = temp_max = pressure_min = pressure_max = NAN;
+  bool first = true;
+  for (int i = 0; i < 24; i++) {
+    float t = temp_readings[i];
+    float p = pressure_readings[i];
+    if (!isnan(t) && t != 0.0f) {
+      if (first) { temp_min = temp_max = t; first = false; }
+      else { if (t < temp_min) temp_min = t; if (t > temp_max) temp_max = t; }
+    }
+    if (!isnan(p) && p != 0.0f) {
+      if (first) { pressure_min = pressure_max = p; first = false; }
+      else { if (p < pressure_min) pressure_min = p; if (p > pressure_max) pressure_max = p; }
+    }
+  }
+}
+
+void MyMesh::calcPressureChanges(float current_pressure, float& change_4h, float& change_12h) {
+  change_4h = change_12h = NAN;
+  // 4 hours ago at (telemetry_index - 5 + 24) % 24, 12 hours ago at (telemetry_index - 13 + 24) % 24
+  if (isnan(current_pressure) || current_pressure == 0.0f) return;
+  int idx_4h = (telemetry_index - 5 + 24) % 24;
+  float pressure_4h = pressure_readings[idx_4h];
+  if (!isnan(pressure_4h) && pressure_4h != 0.0f) change_4h = current_pressure - pressure_4h;
+  int idx_12h = (telemetry_index - 13 + 24) % 24;
+  float pressure_12h = pressure_readings[idx_12h];
+  if (!isnan(pressure_12h) && pressure_12h != 0.0f) change_12h = current_pressure - pressure_12h;
+}
+
+void MyMesh::sendTelemetryMessage() {
+  if (!telemetry_channel_initialized) initTelemetryChannel();
+  if (!telemetry_channel_initialized) {
+    MESH_DEBUG_PRINTLN("Failed to initialize telemetry channel");
+    return;
+  }
+  float current_temp = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE);
+  float current_pressure = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE);
+  float current_humidity = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_RELATIVE_HUMIDITY);
+  float batt_voltage = (float)board.getBattMilliVolts() / 1000.0f;
+  char hum_suffix[16];
+  if (!isnan(current_humidity) && current_humidity >= 0.0f && current_humidity <= 100.0f) {
+    sprintf(hum_suffix, " H=%.1f%%", current_humidity);
+  } else {
+    hum_suffix[0] = '\0';
+  }
+  uint32_t current_sent = getNumSentFlood() + getNumSentDirect();
+  uint32_t repeated_packets = (last_sent_packets_count > 0) ? (current_sent - last_sent_packets_count) : 0;
+  float temp_min, temp_max, pressure_min, pressure_max;
+  calcMinMax24h(temp_min, temp_max, pressure_min, pressure_max);
+  float pressure_change_4h, pressure_change_12h;
+  calcPressureChanges(current_pressure, pressure_change_4h, pressure_change_12h);
+  char msg[160];
+  if (!isnan(current_temp) && !isnan(current_pressure)) {
+    bool has_temp_minmax = !isnan(temp_min) && !isnan(temp_max);
+    bool has_pressure_changes = !isnan(pressure_change_4h) && !isnan(pressure_change_12h);
+    if (has_temp_minmax && has_pressure_changes) {
+      sprintf(msg, "%s: T=%.1f°C (min:%.1f max:%.1f) P=%.1fhPa (Δ4h:%+.1f Δ12h:%+.1f) V=%.2fV R=%lu%s",
+              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+    } else if (has_temp_minmax) {
+      sprintf(msg, "%s: T=%.1f°C (min:%.1f max:%.1f) P=%.1fhPa V=%.2fV R=%lu%s",
+              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+    } else if (has_pressure_changes) {
+      sprintf(msg, "%s: T=%.1f°C P=%.1fhPa (Δ4h:%+.1f Δ12h:%+.1f) V=%.2fV R=%lu%s",
+              _prefs.node_name, current_temp, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+    } else {
+      sprintf(msg, "%s: T=%.1f°C P=%.1fhPa V=%.2fV R=%lu%s",
+              _prefs.node_name, current_temp, current_pressure, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+    }
+  } else {
+    sprintf(msg, "%s: No sensor data V=%.2fV R=%lu%s", _prefs.node_name, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+  }
+  uint32_t timestamp = getRTCClock()->getCurrentTime();
+  uint8_t temp[5 + MAX_TEXT_LEN + 32];
+  memcpy(temp, &timestamp, 4);
+  temp[4] = 0;
+  int text_len = strlen(msg);
+  if (text_len > MAX_TEXT_LEN) text_len = MAX_TEXT_LEN;
+  memcpy(&temp[5], msg, text_len);
+  temp[5 + text_len] = 0;
+  auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, telemetry_channel, temp, 5 + text_len);
+  if (pkt) {
+    sendFlood(pkt);
+    MESH_DEBUG_PRINTLN("Sent telemetry: %s", msg);
+  } else {
+    MESH_DEBUG_PRINTLN("Failed to create telemetry packet");
+  }
 }
 
 // To check if there is pending work
