@@ -113,6 +113,15 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t pending_sf;
   uint8_t pending_cr;
   int  matching_peer_indexes[MAX_CLIENTS];
+
+  // Telemetry data storage (24 hours of hourly readings)
+  float temp_readings[24];
+  float pressure_readings[24];
+  int telemetry_index;
+  uint32_t last_telemetry_send;
+  bool telemetry_channel_initialized;
+  mesh::GroupChannel telemetry_channel;
+  uint32_t last_sent_packets_count;  // Track sent packets count for hourly calculation
 #if defined(WITH_RS232_BRIDGE)
   RS232Bridge bridge;
 #elif defined(WITH_ESPNOW_BRIDGE)
@@ -225,6 +234,12 @@ public:
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();
+
+  void initTelemetryChannel();
+  void recordTelemetryReading(float temp, float pressure);
+  void sendTelemetryMessage();
+  void calcMinMax24h(float& temp_min, float& temp_max, float& pressure_min, float& pressure_max);
+  void calcPressureChanges(float current_pressure, float& change_4h, float& change_12h);
 
 #if defined(WITH_BRIDGE)
   void setBridgeState(bool enable) override {
