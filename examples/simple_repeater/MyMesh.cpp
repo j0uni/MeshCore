@@ -1517,6 +1517,18 @@ void MyMesh::sendTelemetryMessage() {
   } else {
     hum_suffix[0] = '\0';
   }
+  char airtime_suffix[16];
+  {
+    float af = _prefs.airtime_factor;
+    if (af >= 0.0f) {
+      int duty_pct = (int)(0.5f + 100.0f / (1.0f + af));
+      if (duty_pct < 0) duty_pct = 0;
+      if (duty_pct > 100) duty_pct = 100;
+      sprintf(airtime_suffix, " A=%d", duty_pct);
+    } else {
+      airtime_suffix[0] = '\0';
+    }
+  }
   uint32_t current_sent = getNumSentFlood() + getNumSentDirect();
   uint32_t repeated_packets = (last_sent_packets_count > 0) ? (current_sent - last_sent_packets_count) : 0;
   float temp_min, temp_max, pressure_min, pressure_max;
@@ -1528,20 +1540,20 @@ void MyMesh::sendTelemetryMessage() {
     bool has_temp_minmax = !isnan(temp_min) && !isnan(temp_max);
     bool has_pressure_changes = !isnan(pressure_change_4h) && !isnan(pressure_change_12h);
     if (has_temp_minmax && has_pressure_changes) {
-      sprintf(msg, "%s: T=%.1f°C (min:%.1f max:%.1f) P=%.1fhPa (Δ4h:%+.1f Δ12h:%+.1f) V=%.2fV R=%lu%s",
-              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+      sprintf(msg, "%s: T=%.1f°C (min:%.1f max:%.1f) P=%.1fhPa (Δ4h:%+.1f Δ12h:%+.1f) V=%.2fV R=%lu%s%s",
+              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, airtime_suffix, hum_suffix);
     } else if (has_temp_minmax) {
-      sprintf(msg, "%s: T=%.1f°C (min:%.1f max:%.1f) P=%.1fhPa V=%.2fV R=%lu%s",
-              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+      sprintf(msg, "%s: T=%.1f°C (min:%.1f max:%.1f) P=%.1fhPa V=%.2fV R=%lu%s%s",
+              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, batt_voltage, (unsigned long)repeated_packets, airtime_suffix, hum_suffix);
     } else if (has_pressure_changes) {
-      sprintf(msg, "%s: T=%.1f°C P=%.1fhPa (Δ4h:%+.1f Δ12h:%+.1f) V=%.2fV R=%lu%s",
-              _prefs.node_name, current_temp, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+      sprintf(msg, "%s: T=%.1f°C P=%.1fhPa (Δ4h:%+.1f Δ12h:%+.1f) V=%.2fV R=%lu%s%s",
+              _prefs.node_name, current_temp, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, airtime_suffix, hum_suffix);
     } else {
-      sprintf(msg, "%s: T=%.1f°C P=%.1fhPa V=%.2fV R=%lu%s",
-              _prefs.node_name, current_temp, current_pressure, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+      sprintf(msg, "%s: T=%.1f°C P=%.1fhPa V=%.2fV R=%lu%s%s",
+              _prefs.node_name, current_temp, current_pressure, batt_voltage, (unsigned long)repeated_packets, airtime_suffix, hum_suffix);
     }
   } else {
-    sprintf(msg, "%s: No sensor data V=%.2fV R=%lu%s", _prefs.node_name, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+    sprintf(msg, "%s: No sensor data V=%.2fV R=%lu%s%s", _prefs.node_name, batt_voltage, (unsigned long)repeated_packets, airtime_suffix, hum_suffix);
   }
   uint32_t timestamp = getRTCClock()->getCurrentTime();
   uint8_t temp[5 + MAX_TEXT_LEN + 32];
