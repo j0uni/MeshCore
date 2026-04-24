@@ -79,6 +79,57 @@ static inline bool telemPressureUsable(float p) {
   return !telemIsNan(p) && p >= 200.0f && p <= 1200.0f;
 }
 
+#if defined(T1000_E) && defined(PIN_BUZZER)
+static void playKeyboardCatThemeDirect(int pin) {
+  const int REST = 0;
+  const int G3 = 196;
+  const int A3 = 220;
+  const int B3 = 247;
+  const int C4 = 262;
+  const int D4 = 294;
+  const int E4 = 330;
+  const int G4 = 392;
+
+  const int tempo = 280;
+  const int melody[] = {
+    REST,1, REST,1,
+    C4,4, E4,4, G4,4, E4,4,
+    C4,4, E4,8, G4,-4, E4,4,
+    A3,4, C4,4, E4,4, C4,4,
+    A3,4, C4,8, E4,-4, C4,4,
+    G3,4, B3,4, D4,4, B3,4,
+    G3,4, B3,8, D4,-4, B3,4,
+    G3,4, B3,8, D4,-4, B3,4,
+  
+  };
+
+  const int count = sizeof(melody) / sizeof(melody[0]);
+  const int wholenote = (60000 * 4) / tempo/4;
+
+  for (int i = 0; i < count; i += 2) {
+#if defined(PIN_USER_BTN)
+    if (digitalRead(PIN_USER_BTN) == USER_BTN_PRESSED) {
+      break;  // allow user to cancel startup song
+    }
+#endif
+
+    const int pitch = melody[i];
+    const int divider = melody[i + 1];
+
+    int noteDuration = wholenote / (divider > 0 ? divider : -divider);
+    if (divider < 0) noteDuration = (int)(noteDuration * 1.5f);
+
+    if (pitch == REST) {
+      noTone(pin);
+    } else {
+      tone(pin, pitch, (int)(noteDuration * 0.9f));
+    }
+    delay(noteDuration*4);
+    noTone(pin);
+  }
+}
+#endif
+
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
 #if MAX_NEIGHBOURS // check if neighbours enabled
   // find existing neighbour, else use least recently updated
@@ -495,8 +546,8 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #endif
 
 #if defined(T1000_E) && defined(PIN_BUZZER)
-  // Very short receive "tick" on T1000-E.
-  buzzer.play("tick:d=64,o=7,b=600:c");
+  // Very short receive "tick" on T1000-E (direct tone, no RTTTL).
+  tone(PIN_BUZZER, 500, 5);
 #endif
 
   if (_logging) {
@@ -1018,10 +1069,16 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #endif
 
 #ifdef PIN_BUZZER
-  buzzer.begin();
 #if defined(T1000_E)
-  // Override generic startup chime with a short Leisure Suit Larry style intro (first two bars).
-  buzzer.play("lsl:d=8,o=5,b=140:16e,16g,16a,16b,2e6,16d6,16c6,16a#,2b,p,16b,16c6,16d6,2e6");
+  #ifdef PIN_BUZZER_EN
+  pinMode(PIN_BUZZER_EN, OUTPUT);
+  digitalWrite(PIN_BUZZER_EN, HIGH);
+  #endif
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+  playKeyboardCatThemeDirect(PIN_BUZZER);
+#else
+  buzzer.begin();
 #endif
 #endif
 }
@@ -1318,7 +1375,7 @@ void MyMesh::loop() {
   bridge.loop();
 #endif
 
-#ifdef PIN_BUZZER
+#if defined(PIN_BUZZER) && !defined(T1000_E)
   if (buzzer.isPlaying()) {
     buzzer.loop();
   }
