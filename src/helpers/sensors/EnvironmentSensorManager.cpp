@@ -202,8 +202,16 @@ bool EnvironmentSensorManager::begin() {
   #endif
 
   #if ENV_INCLUDE_BME280
-  if (BME280.begin(TELEM_BME280_ADDRESS, TELEM_WIRE)) {
-    MESH_DEBUG_PRINTLN("Found BME280 at address: %02X", TELEM_BME280_ADDRESS);
+  uint8_t bme280_addr = TELEM_BME280_ADDRESS;
+  bool bme280_found = BME280.begin(bme280_addr, TELEM_WIRE);
+  if (!bme280_found) {
+    // Common breakout boards use either 0x76 or 0x77 depending on SDO strap.
+    bme280_addr = (TELEM_BME280_ADDRESS == 0x76) ? 0x77 : 0x76;
+    bme280_found = BME280.begin(bme280_addr, TELEM_WIRE);
+  }
+
+  if (bme280_found) {
+    MESH_DEBUG_PRINTLN("Found BME280 at address: %02X", bme280_addr);
     MESH_DEBUG_PRINTLN("BME sensor ID: %02X", BME280.sensorID());
     // Reduce self-heating: single-shot conversions, light oversampling, long standby.
     BME280.setSampling(Adafruit_BME280::MODE_FORCED,
@@ -215,7 +223,8 @@ bool EnvironmentSensorManager::begin() {
     BME280_initialized = true;
   } else {
     BME280_initialized = false;
-    MESH_DEBUG_PRINTLN("BME280 was not found at I2C address %02X", TELEM_BME280_ADDRESS);
+    MESH_DEBUG_PRINTLN("BME280 was not found at I2C addresses %02X or %02X", TELEM_BME280_ADDRESS,
+                       (TELEM_BME280_ADDRESS == 0x76) ? 0x77 : 0x76);
   }
   #endif
 

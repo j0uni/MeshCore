@@ -1,3 +1,32 @@
+## Custom Firmware Changes In This Repo
+
+This repository contains custom changes on top of upstream MeshCore firmware. The most important customizations currently included are:
+
+### How `#telemetry` works in this fork
+
+- Repeater firmware auto-creates (or uses) a region named `#telemetry`.
+- Telemetry text is sent as encrypted group datagrams on that region using a shared channel secret configured in firmware.
+- The repeater periodically gathers sensor data + board data and publishes a human-readable message to `#telemetry`.
+- Message format is variant-dependent:
+  - `T1000-E`: `T=...`, `V=...V`, `LU=...`
+  - Other repeaters: standard repeater telemetry text fields.
+
+- `T1000-E` repeater behavior:
+  - Device status LED heartbeat: very short blink every 5 seconds.
+  - Short speaker "tick" on each received radio packet.
+  - Variant-specific `#telemetry` text payload format including:
+    - temperature (`T=...`)
+    - battery voltage (`V=...V`)
+    - luminosity (`LU=...`)
+- Repeater telemetry text cleanup:
+  - Removed the `A=...` airtime field from `simple_repeater` telemetry message format.
+- BME280 detection robustness:
+  - Sensor init now probes both common I2C addresses (`0x76` and `0x77`) instead of only one.
+- XIAO nRF52 I2C mapping adjustment:
+  - Swapped `PIN_WIRE_SCL` / `PIN_WIRE_SDA` mapping in the `xiao_nrf52` PlatformIO target config.
+
+These changes are intended for the custom hardware/firmware workflow in this fork and may differ from the official upstream behavior.
+
 ## About MeshCore
 
 MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.

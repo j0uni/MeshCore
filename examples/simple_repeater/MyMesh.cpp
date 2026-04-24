@@ -494,6 +494,11 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
   }
 #endif
 
+#if defined(T1000_E) && defined(PIN_BUZZER)
+  // Very short receive "tick" on T1000-E.
+  buzzer.play("tick:d=64,o=7,b=600:c");
+#endif
+
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
     if (f) {
@@ -942,6 +947,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   last_telemetry_send = 0;
   telemetry_channel_initialized = false;
   last_sent_packets_count = 0;
+#if defined(T1000_E)
+  led_heartbeat_next_ms = 0;
+  led_heartbeat_off_ms = 0;
+#endif
 }
 
 void MyMesh::begin(FILESYSTEM *fs) {
@@ -1000,6 +1009,21 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // Initialize packet count tracking for hourly telemetry
   last_sent_packets_count = getNumSentFlood() + getNumSentDirect();
   last_telemetry_send = 0;  // Force first send in loop() after delay
+
+#if defined(T1000_E) && defined(PIN_STATUS_LED)
+  pinMode(PIN_STATUS_LED, OUTPUT);
+  digitalWrite(PIN_STATUS_LED, LOW);
+  led_heartbeat_next_ms = millis() + 5000;
+  led_heartbeat_off_ms = 0;
+#endif
+
+#ifdef PIN_BUZZER
+  buzzer.begin();
+#if defined(T1000_E)
+  // Override generic startup chime with a short Leisure Suit Larry style intro (first two bars).
+  buzzer.play("lsl:d=8,o=5,b=140:16e,16g,16a,16b,2e6,16d6,16c6,16a#,2b,p,16b,16c6,16d6,2e6");
+#endif
+#endif
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size) {
@@ -1294,6 +1318,25 @@ void MyMesh::loop() {
   bridge.loop();
 #endif
 
+#ifdef PIN_BUZZER
+  if (buzzer.isPlaying()) {
+    buzzer.loop();
+  }
+#endif
+
+#if defined(T1000_E) && defined(PIN_STATUS_LED)
+  uint32_t now_ms = millis();
+  if (led_heartbeat_off_ms && millisHasNowPassed(led_heartbeat_off_ms)) {
+    digitalWrite(PIN_STATUS_LED, LOW);
+    led_heartbeat_off_ms = 0;
+  }
+  if (led_heartbeat_next_ms && millisHasNowPassed(led_heartbeat_next_ms)) {
+    digitalWrite(PIN_STATUS_LED, HIGH);
+    led_heartbeat_off_ms = now_ms + 20;      // very short blink
+    led_heartbeat_next_ms = now_ms + 5000;   // every 5 seconds
+  }
+#endif
+
   mesh::Mesh::loop();
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
@@ -1519,24 +1562,13 @@ void MyMesh::sendTelemetryMessage() {
   float current_temp = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE);
   float current_pressure = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE);
   float current_humidity = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_RELATIVE_HUMIDITY);
+  float current_luminosity = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_LUMINOSITY);
   float batt_voltage = (float)board.getBattMilliVolts() / 1000.0f;
   char hum_suffix[16];
   if (!telemIsNan(current_humidity) && current_humidity >= 0.0f && current_humidity <= 100.0f) {
     sprintf(hum_suffix, " H=%.1f%%", current_humidity);
   } else {
     hum_suffix[0] = '\0';
-  }
-  char airtime_suffix[16];
-  {
-    float af = _prefs.airtime_factor;
-    if (af >= 0.0f) {
-      int duty_pct = (int)(0.5f + 100.0f / (1.0f + af));
-      if (duty_pct < 0) duty_pct = 0;
-      if (duty_pct > 100) duty_pct = 100;
-      sprintf(airtime_suffix, " A=%d", duty_pct);
-    } else {
-      airtime_suffix[0] = '\0';
-    }
   }
   uint32_t current_sent = getNumSentFlood() + getNumSentDirect();
   uint32_t repeated_packets = (last_sent_packets_count > 0) ? (current_sent - last_sent_packets_count) : 0;
@@ -1547,9 +1579,25 @@ void MyMesh::sendTelemetryMessage() {
   char msg[160];
   const bool has_temp = telemTempUsable(current_temp);
   const bool has_pressure = telemPressureUsable(current_pressure);
+  const bool has_luminosity = !telemIsNan(current_luminosity) && current_luminosity >= 0.0f;
   int len = snprintf(msg, sizeof(msg), "%s:", _prefs.node_name);
   if (len < 0) len = 0;
   if ((size_t)len >= sizeof(msg)) len = (int)sizeof(msg) - 1;
+  if (has_luminosity) {
+    // T1000-E style telemetry text: concise T/V/LU fields.
+    if (has_temp) {
+      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " T=%.1f°C", current_temp);
+      if (n > 0) len += n;
+    }
+    {
+      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " V=%.2fV", batt_voltage);
+      if (n > 0) len += n;
+    }
+    {
+      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " LU=%.0f", current_luminosity);
+      if (n > 0) len += n;
+    }
+  } else {
   if (has_temp) {
     const bool has_temp_minmax = !telemIsNan(temp_min) && !telemIsNan(temp_max) && telemTempUsable(temp_min) && telemTempUsable(temp_max);
     int n = has_temp_minmax
@@ -1565,8 +1613,9 @@ void MyMesh::sendTelemetryMessage() {
     if (n > 0) len += n;
   }
   {
-    int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " V=%.2fV R=%lu%s%s", batt_voltage, (unsigned long)repeated_packets, airtime_suffix, hum_suffix);
+    int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " V=%.2fV R=%lu%s", batt_voltage, (unsigned long)repeated_packets, hum_suffix);
     if (n > 0) len += n;
+  }
   }
   uint32_t timestamp = getRTCClock()->getCurrentTime();
   uint8_t temp[5 + MAX_TEXT_LEN + 32];

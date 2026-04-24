@@ -35,6 +35,44 @@ float Dispatcher::getAirtimeBudgetFactor() const {
   return 1.0;
 }
 
+unsigned long Dispatcher::getCurrentRemainingTxBudget() const {
+  float factor = getAirtimeBudgetFactor();
+  if (factor < 0.0f) factor = 0.0f;
+
+  float duty_cycle = 1.0f / (1.0f + factor);
+  unsigned long max_budget = (unsigned long)(getDutyCycleWindowMs() * duty_cycle);
+  if (max_budget == 0) return 0;
+
+  unsigned long now = _ms->getMillis();
+  unsigned long elapsed = now - last_budget_update;
+  unsigned long refill = (unsigned long)(elapsed * duty_cycle);
+
+  unsigned long budget = tx_budget_ms;
+  if (refill > 0) {
+    if (budget >= max_budget || refill >= (max_budget - budget)) {
+      budget = max_budget;
+    } else {
+      budget += refill;
+    }
+  }
+  return budget;
+}
+
+uint8_t Dispatcher::getCurrentTxAirtimeUsedPercent() const {
+  float factor = getAirtimeBudgetFactor();
+  if (factor < 0.0f) factor = 0.0f;
+
+  float duty_cycle = 1.0f / (1.0f + factor);
+  unsigned long max_budget = (unsigned long)(getDutyCycleWindowMs() * duty_cycle);
+  if (max_budget == 0) return 0;
+
+  unsigned long remaining = getCurrentRemainingTxBudget();
+  unsigned long used = (remaining >= max_budget) ? 0 : (max_budget - remaining);
+  unsigned long pct = (used * 100UL + (max_budget / 2UL)) / max_budget;  // rounded
+  if (pct > 100UL) pct = 100UL;
+  return (uint8_t)pct;
+}
+
 void Dispatcher::updateTxBudget() {
   unsigned long now = _ms->getMillis();
   unsigned long elapsed = now - last_budget_update;
