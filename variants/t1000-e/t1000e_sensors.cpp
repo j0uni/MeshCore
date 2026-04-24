@@ -50,20 +50,22 @@ static float get_heater_temperature(unsigned int vcc_volt, unsigned int ntc_volt
   return temp;
 }
 
-static int get_light_lv(unsigned int light_volt) {
-  float Vout = 0, Vin = 0, Rt = 0, temp = 0;
+static int get_light_lv(unsigned int light_volt, unsigned int vcc_volt) {
   unsigned int light_level = 0;
+  unsigned int effective_vcc = vcc_volt;
 
-  // Seeed's firmware maps the photocell reading to a 0-100 % range rather than lux.
+  if (effective_vcc < 200) effective_vcc = 200;  // avoid divide-by-near-zero
+
+  // Map photocell voltage to 0-100% using the measured sensor rail.
   if (light_volt <= 80) {
     light_level = 0;
     return light_level;
-  } else if (light_volt >= 2480) {
+  } else if (light_volt >= effective_vcc) {
     light_level = 100;
     return light_level;
   }
-  Vout = light_volt;
-  light_level = 100 * (Vout - 80) / LIGHT_REF_VCC;
+
+  light_level = (100U * (light_volt - 80U)) / (effective_vcc - 80U);
 
   return light_level;
 }
@@ -87,15 +89,17 @@ float t1000e_get_temperature(void) {
 
 uint32_t t1000e_get_light(void) {
   int lux = 0;
-  unsigned int lux_v = 0;
+  unsigned int lux_v = 0, vcc_v = 0;
 
   digitalWrite(PIN_3V3_EN, HIGH);
   digitalWrite(SENSOR_EN, HIGH);
   analogReference(AR_INTERNAL_3_0);
   analogReadResolution(12);
   delay(10);
+  unsigned int rail_v = (1000.0 * (analogRead(BATTERY_PIN) * ADC_MULTIPLIER * AREF_VOLTAGE)) / 4096;
+  vcc_v = (rail_v > NTC_REF_VCC) ? NTC_REF_VCC : rail_v;
   lux_v = 1000 * analogRead(LUX_SENSOR) * AREF_VOLTAGE / 4096;
-  lux = get_light_lv(lux_v);
+  lux = get_light_lv(lux_v, vcc_v);
   digitalWrite(SENSOR_EN, LOW);
   digitalWrite(PIN_3V3_EN, LOW);
 

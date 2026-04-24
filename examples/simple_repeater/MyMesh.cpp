@@ -547,7 +547,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 
 #if defined(T1000_E) && defined(PIN_BUZZER)
   // Very short receive "tick" on T1000-E (direct tone, no RTTTL).
-  tone(PIN_BUZZER, 500, 5);
+  tone(PIN_BUZZER, 2000, 5);
 #endif
 
   if (_logging) {
@@ -1651,7 +1651,7 @@ void MyMesh::sendTelemetryMessage() {
       if (n > 0) len += n;
     }
     {
-      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " LU=%.0f", current_luminosity);
+      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " LU=%.0f%%", current_luminosity);
       if (n > 0) len += n;
     }
   } else {
