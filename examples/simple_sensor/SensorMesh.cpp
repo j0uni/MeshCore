@@ -889,6 +889,14 @@ bool  SensorMesh::getGPS(uint8_t channel, float& lat, float& lon, float& alt) {
   return false;
 }
 
+void SensorMesh::refreshTelemetryNow() {
+  telemetry.reset();
+  telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
+  sensors.querySensors(0xFF, telemetry);
+  onSensorDataRead();
+  last_read_time = getRTCClock()->getCurrentTime();
+}
+
 void SensorMesh::loop() {
   mesh::Mesh::loop();
 
@@ -920,14 +928,7 @@ void SensorMesh::loop() {
 
   uint32_t curr = getRTCClock()->getCurrentTime();
   if (curr >= last_read_time + SENSOR_READ_INTERVAL_SECS) {
-    telemetry.reset();
-    telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
-    // query other sensors -- target specific
-    sensors.querySensors(0xFF, telemetry);  // allow all telemetry permissions
-
-    onSensorDataRead();
-
-    last_read_time = curr;
+    refreshTelemetryNow();
   }
 
   // check the alert send queue

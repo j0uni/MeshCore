@@ -5,6 +5,10 @@
   static UITask ui_task(display);
 #endif
 
+#ifndef MAX_TEXT_LEN
+#define MAX_TEXT_LEN 120
+#endif
+
 class MyMesh : public SensorMesh {
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
@@ -13,10 +17,83 @@ public:
   {
   }
 
+#if defined(NRF52_PLATFORM)
+  void sendTelemetryToChannelNow() {
+    // Build a fresh telemetry snapshot immediately.
+    refreshTelemetryNow();
+
+    if (!telemetry_channel_initialized) {
+      const char* channel_key_hex = "170d4fb04b507fb4693c37f183a47719";
+      uint8_t channel_key[16];
+      if (mesh::Utils::fromHex(channel_key, 16, channel_key_hex)) {
+        memset(telemetry_channel.secret, 0, sizeof(telemetry_channel.secret));
+        memcpy(telemetry_channel.secret, channel_key, 16);
+        mesh::Utils::sha256(telemetry_channel.hash, sizeof(telemetry_channel.hash), telemetry_channel.secret, 16);
+        telemetry_channel_initialized = true;
+      }
+    }
+
+    if (!telemetry_channel_initialized) return;
+
+    const float t = getTemperature(TELEM_CHANNEL_SELF);
+    const float v = getVoltage(TELEM_CHANNEL_SELF);
+    const float h = getRelativeHumidity(TELEM_CHANNEL_SELF);
+    const float p = getBarometricPressure(TELEM_CHANNEL_SELF);
+    const float lu = getTelemValue(TELEM_CHANNEL_SELF, LPP_LUMINOSITY);
+
+    char msg[160];
+    int len = snprintf(msg, sizeof(msg), "%s:", getNodePrefs()->node_name);
+    if (!isnan(t) && t > -100.0f && t < 100.0f) {
+      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " T=%.1fC", t);
+      if (n > 0) len += n;
+    }
+    {
+      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " V=%.2fV", v);
+      if (n > 0) len += n;
+    }
+    if (!isnan(h) && h >= 0.0f && h <= 100.0f) {
+      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " H=%.1f%%", h);
+      if (n > 0) len += n;
+    }
+    if (!isnan(p) && p > 200.0f && p < 1300.0f) {
+      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " P=%.1fhPa", p);
+      if (n > 0) len += n;
+    }
+    if (!isnan(lu) && lu >= 0.0f) {
+      int n = snprintf(msg + len, sizeof(msg) - (size_t)len, " LU=%.0f%%", lu);
+      if (n > 0) len += n;
+    }
+
+    uint32_t timestamp = getRTCClock()->getCurrentTime();
+    uint8_t payload[5 + MAX_TEXT_LEN + 1];
+    memcpy(payload, &timestamp, 4);
+    payload[4] = 0;
+
+    int text_len = strlen(msg);
+    if (text_len > MAX_TEXT_LEN) text_len = MAX_TEXT_LEN;
+    memcpy(&payload[5], msg, text_len);
+    payload[5 + text_len] = 0;
+
+    auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, telemetry_channel, payload, 5 + text_len);
+    if (pkt) {
+      sendFlood(pkt);
+      MESH_DEBUG_PRINTLN("Sent #telemetry: %s", msg);
+    }
+  }
+
+  bool hasPendingTxWork() const {
+    return _mgr->getOutboundTotal() > 0;
+  }
+#endif
+
 protected:
   /* ========================== custom logic here ========================== */
   Trigger low_batt, critical_batt;
   TimeSeriesData  battery_data;
+#if defined(NRF52_PLATFORM)
+  mesh::GroupChannel telemetry_channel = {};
+  bool telemetry_channel_initialized = false;
+#endif
 
   void onSensorDataRead() override {
     float batt_voltage = getVoltage(TELEM_CHANNEL_SELF);
@@ -51,6 +128,14 @@ void halt() {
 }
 
 static char command[160];
+
+#if defined(NRF52_PLATFORM)
+static const uint32_t NRF52_SENSOR_SLEEP_SECS = 2UL * 60UL * 60UL;
+static unsigned long sleep_until_ms = 0;
+static unsigned long tx_wait_started_ms = 0;
+enum Nrf52SensorCycleState : uint8_t { CYCLE_SEND, CYCLE_WAIT_TX, CYCLE_SLEEP };
+static Nrf52SensorCycleState nrf52_cycle_state = CYCLE_SEND;
+#endif
 
 void setup() {
   Serial.begin(115200);
@@ -114,6 +199,14 @@ void setup() {
 #if ENABLE_ADVERT_ON_BOOT == 1
   the_mesh.sendSelfAdvertisement(16000, false);
 #endif
+
+#if defined(NRF52_PLATFORM)
+  // nRF52 sensor-only autonomous cycle:
+  // wake/boot -> read sensors -> send #telemetry -> radio off -> sleep 2h -> reboot.
+  the_mesh.sendTelemetryToChannelNow();
+  tx_wait_started_ms = millis();
+  nrf52_cycle_state = CYCLE_WAIT_TX;
+#endif
 }
 
 void loop() {
@@ -140,6 +233,28 @@ void loop() {
 
     command[0] = 0;  // reset command buffer
   }
+
+#if defined(NRF52_PLATFORM)
+  the_mesh.loop();
+  sensors.loop();
+  rtc_clock.tick();
+
+  if (nrf52_cycle_state == CYCLE_WAIT_TX) {
+    // Let queued packets flush before sleeping.
+    if (!the_mesh.hasPendingTxWork() && (unsigned long)(millis() - tx_wait_started_ms) > 4000UL) {
+      radio_driver.powerOff();
+      sleep_until_ms = millis() + (NRF52_SENSOR_SLEEP_SECS * 1000UL);
+      nrf52_cycle_state = CYCLE_SLEEP;
+      MESH_DEBUG_PRINTLN("Telemetry sent, entering low-power sleep for 2h");
+    }
+  } else if (nrf52_cycle_state == CYCLE_SLEEP) {
+    if ((long)(millis() - sleep_until_ms) >= 0) {
+      NVIC_SystemReset();
+    }
+    board.sleep(1);
+  }
+  return;
+#endif
 
   the_mesh.loop();
   sensors.loop();

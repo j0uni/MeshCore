@@ -91,6 +91,7 @@ protected:
   float getBarometricPressure(uint8_t channel) { return getTelemValue(channel, LPP_BAROMETRIC_PRESSURE); }
   float getAltitude(uint8_t channel) { return getTelemValue(channel, LPP_ALTITUDE); }
   bool  getGPS(uint8_t channel, float& lat, float& lon, float& alt);
+  void refreshTelemetryNow();
 
   // alerts
   enum AlertPriority { LOW_PRI_ALERT, HIGH_PRI_ALERT };
