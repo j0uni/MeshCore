@@ -3,6 +3,12 @@
 
 #include "MyMesh.h"
 
+#if defined(T1000_E)
+#ifndef T1000E_REPEATER_BUILD
+#error "T1000-E simple_repeater must use env:t1000e_repeater. Set SECRET_GNSS_CHANNEL_KEY_HEX or .secret_gnss_channel_key (see variants/t1000-e/t1000e_repeater_gnss_channel_key.py)."
+#endif
+#endif
+
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   static UITask ui_task(display);
@@ -26,6 +32,68 @@ unsigned long nextSleepinSecs = 120; // next sleep in seconds. The first sleep (
 #if defined(PIN_USER_BTN) && defined(_SEEED_SENSECAP_SOLAR_H_)
 static unsigned long userBtnDownAt = 0;
 #define USER_BTN_HOLD_OFF_MILLIS 1500
+#endif
+
+#if defined(T1000_E) && defined(PIN_USER_BTN) && defined(PIN_BUZZER)
+#ifndef USER_BTN_PRESSED
+#define USER_BTN_PRESSED LOW
+#endif
+
+static void t1000ePlayGnssRising(int pin) {
+#ifdef PIN_BUZZER_EN
+  digitalWrite(PIN_BUZZER_EN, HIGH);
+#endif
+  const int notes[] = { 523, 659, 784, 1047 };
+  for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+    tone(pin, notes[i], 100);
+    delay(110);
+  }
+  noTone(pin);
+}
+
+static void t1000ePlayGnssFalling(int pin) {
+#ifdef PIN_BUZZER_EN
+  digitalWrite(PIN_BUZZER_EN, HIGH);
+#endif
+  const int notes[] = { 1047, 784, 659, 523 };
+  for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+    tone(pin, notes[i], 100);
+    delay(110);
+  }
+  noTone(pin);
+}
+
+static int t1000e_btn_prev = -1;
+static unsigned long t1000e_btn_down_at = 0;
+
+static void t1000ePollUserBtnGnssToggle() {
+  int st = digitalRead(PIN_USER_BTN);
+  if (t1000e_btn_prev < 0) {
+    t1000e_btn_prev = st;
+    return;
+  }
+  if (st != t1000e_btn_prev) {
+    if (st == USER_BTN_PRESSED) {
+      t1000e_btn_down_at = millis();
+    } else {
+      if (t1000e_btn_down_at != 0) {
+        unsigned long dur = millis() - t1000e_btn_down_at;
+        if (dur >= 40 && dur < 900) {
+          bool on_or_pending = sensors.isGnssPowered() || sensors.isGnssUserInitPending();
+          if (on_or_pending) {
+            t1000ePlayGnssFalling(PIN_BUZZER);
+            sensors.userGnssOff();
+          } else {
+            t1000ePlayGnssRising(PIN_BUZZER);
+            sensors.userGnssOnWithNmeaEcho();
+          }
+        }
+        t1000e_btn_down_at = 0;
+      }
+    }
+    t1000e_btn_prev = st;
+  }
+}
 #endif
 
 void setup() {
@@ -149,6 +217,15 @@ void loop() {
 
   the_mesh.loop();
   sensors.loop();
+#if defined(T1000E_REPEATER_BUILD)
+  if (sensors.consumeGnssTwoHourSessionAutoOff()) {
+    the_mesh.onGnssTwoHourSessionAutoOff();
+  }
+  the_mesh.sendSecretGnssMeshMessageIfPending();
+#endif
+#if defined(T1000_E) && defined(PIN_USER_BTN) && defined(PIN_BUZZER)
+  t1000ePollUserBtnGnssToggle();
+#endif
 #ifdef DISPLAY_CLASS
   ui_task.loop();
 #endif

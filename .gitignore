@@ -17,3 +17,4 @@ compile_commands.json
 .venv/
 venv/
 platformio.local.ini
+.secret_gnss_channel_key

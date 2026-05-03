@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits.h>
 #define RADIOLIB_STATIC_ONLY 1
 #include <RadioLib.h>
 #include <helpers/radiolib/RadioLibWrappers.h>
@@ -15,6 +16,19 @@
 class T1000SensorManager: public SensorManager {
   bool gps_active = false;
   LocationProvider * _nmea;
+  bool _gnss_user_init_active = false;
+  unsigned long _gnss_user_init_deadline = 0;
+  bool _gnss_user_init_reported = false;
+  bool _gnss_first_fix_chirp_done = false;
+  bool _gnss_mesh_msg_pending = false;
+  unsigned long _last_gnss_mesh_send_ms = 0;
+  long _last_gnss_mesh_lat_u = LONG_MIN;
+  long _last_gnss_mesh_lon_u = LONG_MIN;
+  unsigned long _gnss_mesh_retry_after_ms = 0;
+#if defined(T1000E_REPEATER_BUILD)
+  unsigned long _gnss_session_start_ms = 0;
+  bool _gnss_two_hour_auto_off_pending = false;
+#endif
 
   void start_gps();
   void sleep_gps();
@@ -29,6 +43,19 @@ public:
   const char* getSettingValue(int i) const override;
   bool setSettingValue(const char* name, const char* value) override;
   LocationProvider* getLocationProvider() { return _nmea; }
+
+  bool isGnssPowered() const { return gps_active; }
+  bool isGnssUserInitPending() const { return _gnss_user_init_active; }
+  void userGnssOnWithNmeaEcho();
+  void userGnssOff();
+
+  bool isGnssMeshMessagePending() const { return _gnss_mesh_msg_pending; }
+  void recordGnssMeshMessageSent();
+  void onSecretGnssMeshSendFailed();
+  bool formatGnssFixMessageForMesh(char* msg, size_t cap);
+#if defined(T1000E_REPEATER_BUILD)
+  bool consumeGnssTwoHourSessionAutoOff();
+#endif
 };
 
 #ifdef DISPLAY_CLASS

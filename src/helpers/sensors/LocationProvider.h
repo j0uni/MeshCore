@@ -22,4 +22,7 @@ public:
     virtual void stop() = 0;
     virtual void loop() = 0;
     virtual bool isEnabled() = 0;
+
+    /** Optional: echo raw NMEA bytes to USB Serial (e.g. during GNSS bring-up). Default no-op. */
+    virtual void setSerialNmeaEcho(bool /*on*/) {}
 };

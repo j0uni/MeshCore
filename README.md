@@ -2,6 +2,55 @@
 
 This repository contains custom changes on top of upstream MeshCore firmware. The most important customizations currently included are:
 
+### T1000-E repeater: GNSS bring-up and first-fix mesh message
+
+This fork adds a **T1000-E–specific GNSS path** for the `simple_repeater` example, built with PlatformIO environment **`t1000e_repeater`** (Seeed T1000-E, LR1110, onboard Airoha AG3335 on `Serial1`). Upstream-style NMEA parsing still runs through `MicroNMEALocationProvider`; the custom pieces are power/init, UX, and a one-shot mesh announcement on first fix.
+
+**Build and flash (from the repo root, where `platformio.ini` lives)**
+
+- The **16-byte group PSK** for the first-fix mesh message is **never in source**. Pass **exactly 32 hex digits** at build time:
+  - Shell: `export SECRET_GNSS_CHANNEL_KEY_HEX=<32_lowercase_hex_digits>`, or
+  - Gitignored one-line file in the project root: `.secret_gnss_channel_key`
+- The build fails if the key is missing or not 32 hex characters (see `variants/t1000-e/t1000e_repeater_gnss_channel_key.py`).
+
+Example:
+
+```bash
+SECRET_GNSS_CHANNEL_KEY_HEX=<your_32_hex_digits> pio run -e t1000e_repeater -t upload
+```
+
+There is **no separate channel-name build flag**. The hashtag name is **derived from the PSK**: `#` plus the first **14 bytes** of `SHA256(PSK)` rendered as **lowercase hex** (28 characters). Any listener with the same PSK can compute the same channel name and decrypt.
+
+**Initialization and bring-up**
+
+- `variants/t1000-e/t1000e_gps_bringup.cpp` runs an **AG3335 bring-up sequence** (command order and delays aligned with the terminaattori reference): reset, baud, wakeup, and periodic health checks. Optional step logs can be enabled from the bring-up API.
+- The UART is **not** used to stream full NMEA to USB. When GNSS is started from the **user button** path, bring-up can print `[GPS]` / `[GNSS]` step labels and a one-time **`first NMEA received`** after the first plausible NMEA/PAIR/PMTK line; the automatic `start_gps()` path runs the same sequence **without** that progress logging.
+
+**Runtime behavior (repeater firmware)**
+
+- **User button** (short press): toggles GNSS power/init. **Buzzer**: short rising glissando when GNSS is turned on, falling when turned off (see `examples/simple_repeater/main.cpp`).
+- **Boot**: short low–high buzzer chirp in `MyMesh::begin` (T1000-E with buzzer pins defined).
+- **GNSS mesh messages** (derived secret `#…` channel, see below): a buzzer pattern plays on **first** valid fix; the same payload is sent as encrypted **group text** (flood) when a fix is valid and **either** about **5 minutes** have passed since the last successful send **or** the receiver has moved **more than 500 m** (great-circle) from the position last sent. Failed sends retry at most once per minute until the next normal trigger.
+- **Session auto-off:** **two hours** after GNSS is enabled (boot `start_gps()` or button turn-on), firmware **sleeps the GNSS module**, **clears** pending mesh GNSS sends, sets **`gps_enabled` saved prefs to 0**, and prints `[GNSS] Auto power-off after 2h session` on USB serial. Turn GNSS on again with a **short button press** (or CLI `set gps 1` / `save` as applicable).
+
+**Secret GNSS group channel (companion / another radio)**
+
+- **PSK:** Same **32 hex characters** you passed as `SECRET_GNSS_CHANNEL_KEY_HEX` when building the repeater. The receiver must use that **16-byte** secret; decryption fails otherwise.
+- **Name:** `#` + lowercase hex of `SHA256(PSK)[0..13]` (14 bytes → 28 hex chars). Join or create that hashtag in the client together with the PSK.
+- **GNSS** must get a **first valid fix** (sky view, antenna) before mesh GNSS messages are sent. **New installs** default to GPS on; **saved prefs** decide whether GNSS starts after reboot (after a 2h auto-off, prefs stay off until you enable again).
+
+**Source layout (GNSS-related)**
+
+| Area | Location |
+|------|----------|
+| AG3335 bring-up | `variants/t1000-e/t1000e_gps_bringup.{h,cpp}` |
+| Sensors, fix formatting, first-fix chirp / mesh pending flag | `variants/t1000-e/target.{h,cpp}` |
+| Secret channel init, first-fix send, boot buzzer | `examples/simple_repeater/MyMesh.{h,cpp}` |
+| Button / GNSS toggle tones | `examples/simple_repeater/main.cpp` |
+| Build-time GNSS group PSK | `variants/t1000-e/t1000e_repeater_gnss_channel_key.py`, `variants/t1000-e/t1000e_secret_gnss_channel.h` |
+
+`T1000-E` builds that use `examples/simple_repeater/main.cpp` are expected to use **`env:t1000e_repeater`** (`T1000E_REPEATER_BUILD`); otherwise compilation stops with an explicit error.
+
 ### How `#telemetry` works in this fork
 
 - Repeater firmware auto-creates (or uses) a region named `#telemetry`.

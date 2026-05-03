@@ -46,6 +46,7 @@ class MicroNMEALocationProvider : public LocationProvider {
     long time_valid = 0;
     unsigned long _last_time_sync = 0;
     static const unsigned long TIME_SYNC_INTERVAL = 1800000; // Re-sync every 30 minutes
+    bool _echo_nmea_to_serial = false;
 
 public :
     MicroNMEALocationProvider(Stream& ser, mesh::RTCClock* clock = NULL, int pin_reset = GPS_RESET, int pin_en = GPS_EN,RefCountedDigitalPin* peripher_power=NULL) :
@@ -122,6 +123,15 @@ public :
     long satellitesCount() override { return nmea.getNumSatellites(); }
     bool isValid() override { return nmea.isValid(); }
 
+    /** Milli-knots (NMEA RMC speed × 1000), or LONG_MIN if unknown */
+    long getGnssSpeedMilliknots() const { return nmea.getSpeed(); }
+    /** Thousandths of a degree clockwise from north, or LONG_MIN if unknown */
+    long getGnssCourseMilliDeg() const { return nmea.getCourse(); }
+    /** HDOP in tenths (1.1 → 11) */
+    uint8_t getGnssHdopTenths() const { return nmea.getHDOP(); }
+    /** NMEA nav system id (e.g. P=GPS, N=GNSS) */
+    char getGnssNavSystem() const { return nmea.getNavSystem(); }
+
     long getTimestamp() override { 
         DateTime dt(nmea.getYear(), nmea.getMonth(),nmea.getDay(),nmea.getHour(),nmea.getMinute(),nmea.getSecond());
         return dt.unixtime();
@@ -131,6 +141,8 @@ public :
         nmea.sendSentence(*_gps_serial, sentence);
     }
 
+    void setSerialNmeaEcho(bool on) override { _echo_nmea_to_serial = on; }
+
     void loop() override {
 
         while (_gps_serial->available()) {
@@ -138,6 +150,9 @@ public :
             #ifdef GPS_NMEA_DEBUG
             Serial.print(c);
             #endif
+            if (_echo_nmea_to_serial) {
+                Serial.print(c);
+            }
             nmea.process(c);
         }
 

@@ -125,6 +125,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool telemetry_channel_initialized;
   mesh::GroupChannel telemetry_channel;
   uint32_t last_sent_packets_count;  // Track sent packets count for hourly calculation
+#if defined(T1000E_REPEATER_BUILD)
+  bool secret_gnss_channel_initialized;
+  mesh::GroupChannel secret_gnss_channel;
+#endif
 #if defined(T1000_E)
   uint32_t led_heartbeat_next_ms;
   uint32_t led_heartbeat_off_ms;
@@ -248,6 +252,11 @@ public:
   void initTelemetryChannel();
   void recordTelemetryReading(float temp, float pressure);
   void sendTelemetryMessage();
+#if defined(T1000E_REPEATER_BUILD)
+  void initSecretGnssChannel();
+  void sendSecretGnssMeshMessageIfPending();
+  void onGnssTwoHourSessionAutoOff();
+#endif
   void calcMinMax24h(float& temp_min, float& temp_max, float& pressure_min, float& pressure_max);
   void calcPressureChanges(float current_pressure, float& change_4h, float& change_12h);
 

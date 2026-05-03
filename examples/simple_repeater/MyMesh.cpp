@@ -1,4 +1,7 @@
 #include "MyMesh.h"
+#if defined(T1000E_REPEATER_BUILD)
+#include "t1000e_secret_gnss_channel.h"
+#endif
 #include <algorithm>
 
 /* ------------------------------ Config -------------------------------- */
@@ -80,6 +83,23 @@ static inline bool telemPressureUsable(float p) {
 }
 
 #if defined(T1000_E) && defined(PIN_BUZZER)
+/** Short boot chirp (low then high). Longer “keyboard cat” theme kept below for optional use. */
+static void playBootShortLowHighDirect(int pin) {
+#ifdef PIN_BUZZER_EN
+  digitalWrite(PIN_BUZZER_EN, HIGH);
+#endif
+  const int low_hz = 196;
+  const int high_hz = 784;
+  const int low_ms = 90;
+  const int high_ms = 110;
+  tone(pin, low_hz, low_ms);
+  delay(low_ms + 15);
+  noTone(pin);
+  tone(pin, high_hz, high_ms);
+  delay(high_ms + 15);
+  noTone(pin);
+}
+
 static void playKeyboardCatThemeDirect(int pin) {
   const int REST = 0;
   const int G3 = 196;
@@ -973,7 +993,11 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   StrHelper::strncpy(_prefs.bridge_secret, "LVSITANOS", sizeof(_prefs.bridge_secret));
 
   // GPS defaults
+#if defined(T1000E_REPEATER_BUILD)
+  _prefs.gps_enabled = 1;   // repeater image: GNSS must run for first-fix mesh message
+#else
   _prefs.gps_enabled = 0;
+#endif
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
 
@@ -998,6 +1022,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   last_telemetry_send = 0;
   telemetry_channel_initialized = false;
   last_sent_packets_count = 0;
+#if defined(T1000E_REPEATER_BUILD)
+  secret_gnss_channel_initialized = false;
+  memset(&secret_gnss_channel, 0, sizeof(secret_gnss_channel));
+#endif
 #if defined(T1000_E)
   led_heartbeat_next_ms = 0;
   led_heartbeat_off_ms = 0;
@@ -1057,6 +1085,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   // Initialize telemetry channel
   initTelemetryChannel();
+#if defined(T1000E_REPEATER_BUILD)
+  initSecretGnssChannel();
+#endif
   // Initialize packet count tracking for hourly telemetry
   last_sent_packets_count = getNumSentFlood() + getNumSentDirect();
   last_telemetry_send = 0;  // Force first send in loop() after delay
@@ -1076,7 +1107,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   #endif
   pinMode(PIN_BUZZER, OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);
-  playKeyboardCatThemeDirect(PIN_BUZZER);
+  playBootShortLowHighDirect(PIN_BUZZER);
 #else
   buzzer.begin();
 #endif
@@ -1690,6 +1721,80 @@ void MyMesh::sendTelemetryMessage() {
     MESH_DEBUG_PRINTLN("Failed to create telemetry packet");
   }
 }
+
+#if defined(T1000E_REPEATER_BUILD)
+void MyMesh::initSecretGnssChannel() {
+  if (secret_gnss_channel_initialized) return;
+  uint8_t channel_key[16];
+  if (!mesh::Utils::fromHex(channel_key, 16, SECRET_GNSS_CHANNEL_KEY_HEX)) {
+    return;
+  }
+  uint8_t name_h[32];
+  mesh::Utils::sha256(name_h, sizeof(name_h), channel_key, sizeof(channel_key));
+  char chan_name[32];
+  chan_name[0] = '#';
+  static const char kxd[] = "0123456789abcdef";
+  for (unsigned i = 0; i < 14; i++) {
+    chan_name[1 + 2 * i] = kxd[(name_h[i] >> 4) & 0xf];
+    chan_name[1 + 2 * i + 1] = kxd[name_h[i] & 0xf];
+  }
+  chan_name[29] = '\0';
+
+  auto region = region_map.findByName(chan_name);
+  if (!region) {
+    region = region_map.putRegion(chan_name, 0);
+    if (region) {
+      region->flags &= ~REGION_DENY_FLOOD;
+    }
+  }
+  if (region) {
+    memset(secret_gnss_channel.secret, 0, sizeof(secret_gnss_channel.secret));
+    memcpy(secret_gnss_channel.secret, channel_key, 16);
+    mesh::Utils::sha256(secret_gnss_channel.hash, sizeof(secret_gnss_channel.hash), secret_gnss_channel.secret, 16);
+    secret_gnss_channel_initialized = true;
+  }
+}
+
+void MyMesh::sendSecretGnssMeshMessageIfPending() {
+  if (!sensors.isGnssMeshMessagePending()) return;
+  if (!secret_gnss_channel_initialized) initSecretGnssChannel();
+  if (!secret_gnss_channel_initialized) {
+    sensors.onSecretGnssMeshSendFailed();
+    return;
+  }
+
+  char body[MAX_TEXT_LEN];
+  if (!sensors.formatGnssFixMessageForMesh(body, sizeof(body))) {
+    sensors.onSecretGnssMeshSendFailed();
+    return;
+  }
+
+  char msg[MAX_TEXT_LEN + 1];
+  snprintf(msg, sizeof(msg), "%s: %s", _prefs.node_name, body);
+
+  uint32_t timestamp = getRTCClock()->getCurrentTime();
+  uint8_t temp[5 + MAX_TEXT_LEN + 32];
+  memcpy(temp, &timestamp, 4);
+  temp[4] = 0;
+  int text_len = strlen(msg);
+  if (text_len > MAX_TEXT_LEN) text_len = MAX_TEXT_LEN;
+  memcpy(&temp[5], msg, text_len);
+  temp[5 + text_len] = 0;
+  auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, secret_gnss_channel, temp, 5 + text_len);
+  if (pkt) {
+    sendFlood(pkt);
+    sensors.recordGnssMeshMessageSent();
+    MESH_DEBUG_PRINTLN("Sent secret GNSS channel message");
+  } else {
+    sensors.onSecretGnssMeshSendFailed();
+  }
+}
+
+void MyMesh::onGnssTwoHourSessionAutoOff() {
+  _prefs.gps_enabled = 0;
+  savePrefs();
+}
+#endif
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {

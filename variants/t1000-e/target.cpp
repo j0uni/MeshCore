@@ -1,7 +1,43 @@
 #include <Arduino.h>
+#include <limits.h>
+#include <math.h>
+#include <stdio.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+static const unsigned long kGnssMeshIntervalMs = 300000UL;
+static const double kGnssMeshMoveMeters = 500.0;
+#if defined(T1000E_REPEATER_BUILD)
+static const unsigned long kGnssSessionAutoOffMs = 7200000UL;
+#endif
+
+static double t1000e_haversine_m(long lat1_u, long lon1_u, long lat2_u, long lon2_u) {
+  if (lat1_u == LONG_MIN) return 0.0;
+  double lat1 = lat1_u * 1e-6;
+  double lon1 = lon1_u * 1e-6;
+  double lat2 = lat2_u * 1e-6;
+  double lon2 = lon2_u * 1e-6;
+  const double R = 6371000.0;
+  double p1 = lat1 * (M_PI / 180.0);
+  double p2 = lat2 * (M_PI / 180.0);
+  double dphi = (lat2 - lat1) * (M_PI / 180.0);
+  double dl = (lon2 - lon1) * (M_PI / 180.0);
+  double sda = sin(dphi * 0.5);
+  double sdl = sin(dl * 0.5);
+  double a = sda * sda + cos(p1) * cos(p2) * sdl * sdl;
+  if (a > 1.0) a = 1.0;
+  double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+  return R * c;
+}
 #include "t1000e_sensors.h"
+#include "t1000e_gps_bringup.h"
 #include "target.h"
 #include <helpers/sensors/MicroNMEALocationProvider.h>
+#if defined(T1000E_REPEATER_BUILD)
+#include "t1000e_secret_gnss_channel.h"
+#endif
 
 T1000eBoard board;
 
@@ -94,32 +130,56 @@ mesh::LocalIdentity radio_new_identity() {
   return mesh::LocalIdentity(&rng);  // create new random identity
 }
 
+#ifdef PIN_BUZZER
+static void t1000e_play_first_gnss_fix_chirp() {
+#ifdef PIN_BUZZER_EN
+  digitalWrite(PIN_BUZZER_EN, HIGH);
+#endif
+  const int f_lo = 350;
+  const int f_hi = 2200;
+  const unsigned t_short = 70;
+  const unsigned gap = 55;
+  const unsigned t_long = 550;
+  for (int i = 0; i < 3; i++) {
+    tone(PIN_BUZZER, f_lo, t_short);
+    delay(t_short + gap);
+  }
+  noTone(PIN_BUZZER);
+  tone(PIN_BUZZER, f_hi, t_long);
+  delay(t_long + 30);
+  noTone(PIN_BUZZER);
+}
+#endif
+
 void T1000SensorManager::start_gps() {
   gps_active = true;
-  //_nmea->begin();
-  // this init sequence should be better 
-  // comes from seeed examples and deals with all gps pins
-  pinMode(GPS_EN, OUTPUT);
-  digitalWrite(GPS_EN, HIGH);
-  delay(10);
-  pinMode(GPS_VRTC_EN, OUTPUT);
-  digitalWrite(GPS_VRTC_EN, HIGH);
-  delay(10);
-       
-  pinMode(GPS_RESET, OUTPUT);
-  digitalWrite(GPS_RESET, HIGH);
-  delay(10);
-  digitalWrite(GPS_RESET, LOW);
-       
-  pinMode(GPS_SLEEP_INT, OUTPUT);
-  digitalWrite(GPS_SLEEP_INT, HIGH);
-  pinMode(GPS_RTC_INT, OUTPUT);
-  digitalWrite(GPS_RTC_INT, LOW);
-  pinMode(GPS_RESETB, INPUT_PULLUP);
+  _gnss_first_fix_chirp_done = false;
+#if defined(T1000E_REPEATER_BUILD)
+  _gnss_mesh_msg_pending = false;
+  _last_gnss_mesh_send_ms = 0;
+  _last_gnss_mesh_lat_u = LONG_MIN;
+  _last_gnss_mesh_lon_u = LONG_MIN;
+  _gnss_mesh_retry_after_ms = 0;
+  _gnss_session_start_ms = millis();
+  _gnss_two_hour_auto_off_pending = false;
+#endif
+  t1000e_reset_and_assure_gps_functionality(false);
 }
 
 void T1000SensorManager::sleep_gps() {
   gps_active = false;
+  _gnss_user_init_active = false;
+  _gnss_user_init_reported = false;
+  _gnss_first_fix_chirp_done = false;
+  _gnss_mesh_msg_pending = false;
+  _last_gnss_mesh_send_ms = 0;
+  _last_gnss_mesh_lat_u = LONG_MIN;
+  _last_gnss_mesh_lon_u = LONG_MIN;
+  _gnss_mesh_retry_after_ms = 0;
+#if defined(T1000E_REPEATER_BUILD)
+  _gnss_session_start_ms = 0;
+#endif
+  _nmea->setSerialNmeaEcho(false);
   digitalWrite(GPS_VRTC_EN, HIGH);
   digitalWrite(GPS_EN, LOW);
   digitalWrite(GPS_RESET, HIGH);
@@ -132,6 +192,18 @@ void T1000SensorManager::sleep_gps() {
 
 void T1000SensorManager::stop_gps() {
   gps_active = false;
+  _gnss_user_init_active = false;
+  _gnss_user_init_reported = false;
+  _gnss_first_fix_chirp_done = false;
+  _gnss_mesh_msg_pending = false;
+  _last_gnss_mesh_send_ms = 0;
+  _last_gnss_mesh_lat_u = LONG_MIN;
+  _last_gnss_mesh_lon_u = LONG_MIN;
+  _gnss_mesh_retry_after_ms = 0;
+#if defined(T1000E_REPEATER_BUILD)
+  _gnss_session_start_ms = 0;
+#endif
+  _nmea->setSerialNmeaEcho(false);
   digitalWrite(GPS_VRTC_EN, LOW);
   digitalWrite(GPS_EN, LOW);
   digitalWrite(GPS_RESET, HIGH);
@@ -161,21 +233,159 @@ bool T1000SensorManager::querySensors(uint8_t requester_permissions, CayenneLPP&
   return true;
 }
 
+void T1000SensorManager::userGnssOnWithNmeaEcho() {
+  _nmea->syncTime();
+  _gnss_user_init_reported = false;
+  _gnss_first_fix_chirp_done = false;
+  _gnss_mesh_msg_pending = false;
+  _last_gnss_mesh_send_ms = 0;
+  _last_gnss_mesh_lat_u = LONG_MIN;
+  _last_gnss_mesh_lon_u = LONG_MIN;
+  _gnss_mesh_retry_after_ms = 0;
+  _gnss_session_start_ms = millis();
+  _gnss_two_hour_auto_off_pending = false;
+  _nmea->setSerialNmeaEcho(false);
+  gps_active = true;
+  t1000e_reset_and_assure_gps_functionality(true);
+  _gnss_user_init_active = true;
+  _gnss_user_init_deadline = millis() + 120000;
+}
+
+void T1000SensorManager::userGnssOff() {
+  sleep_gps();
+}
+
 void T1000SensorManager::loop() {
   static long next_gps_update = 0;
 
   _nmea->loop();
+
+#if defined(T1000E_REPEATER_BUILD)
+  if (gps_active && _gnss_session_start_ms != 0 &&
+      (unsigned long)(millis() - _gnss_session_start_ms) >= kGnssSessionAutoOffMs) {
+    Serial.println(F("[GNSS] Auto power-off after 2h session"));
+    _gnss_two_hour_auto_off_pending = true;
+    sleep_gps();
+  }
+#endif
+
+  if (gps_active && _nmea->isValid() && !_gnss_first_fix_chirp_done) {
+    _gnss_first_fix_chirp_done = true;
+#if defined(T1000E_REPEATER_BUILD)
+    _gnss_mesh_msg_pending = true;
+#endif
+#ifdef PIN_BUZZER
+    t1000e_play_first_gnss_fix_chirp();
+#endif
+  }
+
+#if defined(T1000E_REPEATER_BUILD)
+  if (gps_active && _nmea->isValid() && _gnss_first_fix_chirp_done && !_gnss_mesh_msg_pending) {
+    unsigned long now = millis();
+    if (_last_gnss_mesh_send_ms != 0) {
+      if ((unsigned long)(now - _last_gnss_mesh_send_ms) >= kGnssMeshIntervalMs) {
+        _gnss_mesh_msg_pending = true;
+      } else if (_last_gnss_mesh_lat_u != LONG_MIN) {
+        long lat_u = _nmea->getLatitude();
+        long lon_u = _nmea->getLongitude();
+        if (t1000e_haversine_m(_last_gnss_mesh_lat_u, _last_gnss_mesh_lon_u, lat_u, lon_u) > kGnssMeshMoveMeters) {
+          _gnss_mesh_msg_pending = true;
+        }
+      }
+    } else if (_gnss_mesh_retry_after_ms != 0 && (long)(now - _gnss_mesh_retry_after_ms) >= 0) {
+      _gnss_mesh_msg_pending = true;
+    }
+  }
+#endif
+
+  if (_gnss_user_init_active) {
+    if (_nmea->isValid()) {
+      if (!_gnss_user_init_reported) {
+        _gnss_user_init_reported = true;
+        _gnss_user_init_active = false;
+      }
+    } else if ((long)(millis() - _gnss_user_init_deadline) >= 0) {
+      Serial.println(F("[GNSS] Post-bring-up window ended (no valid fix yet); GNSS stays powered"));
+      _gnss_user_init_active = false;
+    }
+  }
 
   if (millis() > next_gps_update) {
     if (gps_active && _nmea->isValid()) {
       node_lat = ((double)_nmea->getLatitude())/1000000.;
       node_lon = ((double)_nmea->getLongitude())/1000000.;
       node_altitude = ((double)_nmea->getAltitude()) / 1000.0;
-      //Serial.printf("lat %f lon %f\r\n", _lat, _lon);
     }
     next_gps_update = millis() + 1000;
   }
 }
+
+bool T1000SensorManager::formatGnssFixMessageForMesh(char* msg, size_t cap) {
+  if (!msg || cap < 16 || !_nmea->isValid()) return false;
+  auto* p = static_cast<MicroNMEALocationProvider*>(_nmea);
+  long lat_u = _nmea->getLatitude();
+  long lon_u = _nmea->getLongitude();
+  long alt_mm = _nmea->getAltitude();
+  int sats = (int)_nmea->satellitesCount();
+  long sp = p->getGnssSpeedMilliknots();
+  long co = p->getGnssCourseMilliDeg();
+  unsigned hd = (unsigned)p->getGnssHdopTenths();
+  char nav = p->getGnssNavSystem();
+  if (nav <= 32 || nav > 126) nav = '?';
+  long t_unix = _nmea->getTimestamp();
+
+  double lat = lat_u / 1000000.0;
+  double lon = lon_u / 1000000.0;
+  double alt_m = alt_mm / 1000.0;
+  double hdop = hd / 10.0;
+
+  int n;
+  if (sp != LONG_MIN && co != LONG_MIN) {
+    double kn = sp / 1000.0;
+    double crs = co / 1000.0;
+    n = snprintf(msg, cap,
+                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d spd=%.2fkn crs=%.1f hdop=%.1f nav=%c t=%ld",
+                 lat, lon, alt_m, sats, kn, crs, hdop, nav, (long)t_unix);
+  } else if (sp != LONG_MIN) {
+    double kn = sp / 1000.0;
+    n = snprintf(msg, cap,
+                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d spd=%.2fkn hdop=%.1f nav=%c t=%ld",
+                 lat, lon, alt_m, sats, kn, hdop, nav, (long)t_unix);
+  } else if (co != LONG_MIN) {
+    double crs = co / 1000.0;
+    n = snprintf(msg, cap,
+                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d crs=%.1f hdop=%.1f nav=%c t=%ld",
+                 lat, lon, alt_m, sats, crs, hdop, nav, (long)t_unix);
+  } else {
+    n = snprintf(msg, cap,
+                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d hdop=%.1f nav=%c t=%ld",
+                 lat, lon, alt_m, sats, hdop, nav, (long)t_unix);
+  }
+  return n > 0 && (size_t)n < cap;
+}
+
+void T1000SensorManager::recordGnssMeshMessageSent() {
+  _gnss_mesh_msg_pending = false;
+  _last_gnss_mesh_send_ms = millis();
+  _gnss_mesh_retry_after_ms = 0;
+  if (_nmea->isValid()) {
+    _last_gnss_mesh_lat_u = _nmea->getLatitude();
+    _last_gnss_mesh_lon_u = _nmea->getLongitude();
+  }
+}
+
+void T1000SensorManager::onSecretGnssMeshSendFailed() {
+  _gnss_mesh_msg_pending = false;
+  _gnss_mesh_retry_after_ms = millis() + 60000UL;
+}
+
+#if defined(T1000E_REPEATER_BUILD)
+bool T1000SensorManager::consumeGnssTwoHourSessionAutoOff() {
+  if (!_gnss_two_hour_auto_off_pending) return false;
+  _gnss_two_hour_auto_off_pending = false;
+  return true;
+}
+#endif
 
 int T1000SensorManager::getNumSettings() const { return 1; }  // just one supported: "gps" (power switch)
 
