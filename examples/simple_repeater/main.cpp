@@ -39,6 +39,13 @@ static unsigned long userBtnDownAt = 0;
 #define USER_BTN_PRESSED LOW
 #endif
 
+#ifndef T1000E_USER_BTN_HOLD_POWEROFF_MS
+#define T1000E_USER_BTN_HOLD_POWEROFF_MS 1500ul
+#endif
+#ifndef T1000E_USER_BTN_SHORT_PRESS_MAX_MS
+#define T1000E_USER_BTN_SHORT_PRESS_MAX_MS 900ul
+#endif
+
 static void t1000ePlayGnssRising(int pin) {
 #ifdef PIN_BUZZER_EN
   digitalWrite(PIN_BUZZER_EN, HIGH);
@@ -67,6 +74,7 @@ static int t1000e_btn_prev = -1;
 static unsigned long t1000e_btn_down_at = 0;
 
 static void t1000ePollUserBtnGnssToggle() {
+  unsigned long now = millis();
   int st = digitalRead(PIN_USER_BTN);
   if (t1000e_btn_prev < 0) {
     t1000e_btn_prev = st;
@@ -74,11 +82,11 @@ static void t1000ePollUserBtnGnssToggle() {
   }
   if (st != t1000e_btn_prev) {
     if (st == USER_BTN_PRESSED) {
-      t1000e_btn_down_at = millis();
+      t1000e_btn_down_at = now;
     } else {
       if (t1000e_btn_down_at != 0) {
-        unsigned long dur = millis() - t1000e_btn_down_at;
-        if (dur >= 40 && dur < 900) {
+        unsigned long dur = now - t1000e_btn_down_at;
+        if (dur >= 40 && dur < T1000E_USER_BTN_SHORT_PRESS_MAX_MS) {
           bool on_or_pending = sensors.isGnssPowered() || sensors.isGnssUserInitPending();
           if (on_or_pending) {
             t1000ePlayGnssFalling(PIN_BUZZER);
@@ -92,6 +100,12 @@ static void t1000ePollUserBtnGnssToggle() {
       }
     }
     t1000e_btn_prev = st;
+  }
+  /* Hold past GNSS short-press window: same handler as SenseCAP long-press (board.powerOff). */
+  if (st == USER_BTN_PRESSED && t1000e_btn_down_at != 0 &&
+      (unsigned long)(now - t1000e_btn_down_at) >= T1000E_USER_BTN_HOLD_POWEROFF_MS) {
+    Serial.println(F("Powering off..."));
+    board.powerOff();
   }
 }
 #endif

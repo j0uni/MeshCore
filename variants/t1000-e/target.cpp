@@ -330,36 +330,42 @@ bool T1000SensorManager::formatGnssFixMessageForMesh(char* msg, size_t cap) {
   long sp = p->getGnssSpeedMilliknots();
   long co = p->getGnssCourseMilliDeg();
   unsigned hd = (unsigned)p->getGnssHdopTenths();
-  char nav = p->getGnssNavSystem();
-  if (nav <= 32 || nav > 126) nav = '?';
-  long t_unix = _nmea->getTimestamp();
 
   double lat = lat_u / 1000000.0;
   double lon = lon_u / 1000000.0;
   double alt_m = alt_mm / 1000.0;
   double hdop = hd / 10.0;
 
+  float batt_v = (float)board.getBattMilliVolts() / 1000.0f;
+  float temp_c = t1000e_get_temperature();
+  const bool has_temp = (temp_c == temp_c) && temp_c >= -80.0f && temp_c <= 150.0f;
+  char telem_tail[48];
+  int tt = has_temp
+               ? snprintf(telem_tail, sizeof(telem_tail), " T=%.1f°C V=%.2fV", temp_c, batt_v)
+               : snprintf(telem_tail, sizeof(telem_tail), " V=%.2fV", batt_v);
+  if (tt <= 0 || (size_t)tt >= sizeof(telem_tail)) return false;
+
   int n;
   if (sp != LONG_MIN && co != LONG_MIN) {
     double kn = sp / 1000.0;
     double crs = co / 1000.0;
     n = snprintf(msg, cap,
-                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d spd=%.2fkn crs=%.1f hdop=%.1f nav=%c t=%ld",
-                 lat, lon, alt_m, sats, kn, crs, hdop, nav, (long)t_unix);
+                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d spd=%.2fkn crs=%.1f hdop=%.1f%s",
+                 lat, lon, alt_m, sats, kn, crs, hdop, telem_tail);
   } else if (sp != LONG_MIN) {
     double kn = sp / 1000.0;
     n = snprintf(msg, cap,
-                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d spd=%.2fkn hdop=%.1f nav=%c t=%ld",
-                 lat, lon, alt_m, sats, kn, hdop, nav, (long)t_unix);
+                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d spd=%.2fkn hdop=%.1f%s",
+                 lat, lon, alt_m, sats, kn, hdop, telem_tail);
   } else if (co != LONG_MIN) {
     double crs = co / 1000.0;
     n = snprintf(msg, cap,
-                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d crs=%.1f hdop=%.1f nav=%c t=%ld",
-                 lat, lon, alt_m, sats, crs, hdop, nav, (long)t_unix);
+                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d crs=%.1f hdop=%.1f%s",
+                 lat, lon, alt_m, sats, crs, hdop, telem_tail);
   } else {
     n = snprintf(msg, cap,
-                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d hdop=%.1f nav=%c t=%ld",
-                 lat, lon, alt_m, sats, hdop, nav, (long)t_unix);
+                 "GNSS lat=%.6f lon=%.6f alt=%.1fm sats=%d hdop=%.1f%s",
+                 lat, lon, alt_m, sats, hdop, telem_tail);
   }
   return n > 0 && (size_t)n < cap;
 }
