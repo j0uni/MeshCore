@@ -68,7 +68,9 @@ static uint8_t getDataSize(uint8_t type);
 static uint32_t getMultiplier(uint8_t type);
 static bool isSigned(uint8_t type);
 static float getFloat(const uint8_t* buffer, uint8_t size, uint32_t multiplier, bool is_signed);
+static bool hasTelemEntry(CayenneLPP& telemetry, uint8_t channel, uint8_t type);
 static float getTelemValue(CayenneLPP& telemetry, uint8_t channel, uint8_t type);
+static bool telemFloatIsValid(float v);
 
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
 #if MAX_NEIGHBOURS // check if neighbours enabled
@@ -1330,10 +1332,13 @@ void MyMesh::loop() {
     telemetry.reset();
     telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
     sensors.querySensors(0xFF, telemetry);
-    float temp = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE);
-    float pressure = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE);
-    if (!isnan(temp) && !isnan(pressure)) {
-      recordTelemetryReading(temp, pressure);
+    if (hasTelemEntry(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE) &&
+        hasTelemEntry(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE)) {
+      float temp = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE);
+      float pressure = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE);
+      if (telemFloatIsValid(temp) && telemFloatIsValid(pressure)) {
+        recordTelemetryReading(temp, pressure);
+      }
     }
     static int hour_count = 0;
     static uint32_t first_telemetry_send_after_millis = 0;
@@ -1425,6 +1430,26 @@ static float getFloat(const uint8_t* buffer, uint8_t size, uint32_t multiplier, 
   return sign * ((float)value / multiplier);
 }
 
+static bool telemFloatIsValid(float v) {
+  return (v == v);
+}
+
+static bool hasTelemEntry(CayenneLPP& telemetry, uint8_t channel, uint8_t type) {
+  uint8_t* buf = telemetry.getBuffer();
+  uint8_t size = telemetry.getSize();
+  uint8_t i = 0;
+  while (i + 2 < size) {
+    uint8_t ch = buf[i++];
+    uint8_t t = buf[i++];
+    uint8_t sz = getDataSize(t);
+    if (ch == channel && t == type) {
+      return true;
+    }
+    i += sz;
+  }
+  return false;
+}
+
 static float getTelemValue(CayenneLPP& telemetry, uint8_t channel, uint8_t type) {
   uint8_t* buf = telemetry.getBuffer();
   uint8_t size = telemetry.getSize();
@@ -1474,16 +1499,17 @@ void MyMesh::recordTelemetryReading(float temp, float pressure) {
 
 void MyMesh::calcMinMax24h(float& temp_min, float& temp_max, float& pressure_min, float& pressure_max) {
   temp_min = temp_max = pressure_min = pressure_max = NAN;
-  bool first = true;
+  bool first_temp = true;
+  bool first_pressure = true;
   for (int i = 0; i < 24; i++) {
     float t = temp_readings[i];
     float p = pressure_readings[i];
-    if (!isnan(t) && t != 0.0f) {
-      if (first) { temp_min = temp_max = t; first = false; }
+    if (telemFloatIsValid(t) && t != 0.0f) {
+      if (first_temp) { temp_min = temp_max = t; first_temp = false; }
       else { if (t < temp_min) temp_min = t; if (t > temp_max) temp_max = t; }
     }
-    if (!isnan(p) && p != 0.0f) {
-      if (first) { pressure_min = pressure_max = p; first = false; }
+    if (telemFloatIsValid(p) && p != 0.0f) {
+      if (first_pressure) { pressure_min = pressure_max = p; first_pressure = false; }
       else { if (p < pressure_min) pressure_min = p; if (p > pressure_max) pressure_max = p; }
     }
   }
@@ -1492,13 +1518,13 @@ void MyMesh::calcMinMax24h(float& temp_min, float& temp_max, float& pressure_min
 void MyMesh::calcPressureChanges(float current_pressure, float& change_4h, float& change_12h) {
   change_4h = change_12h = NAN;
   // 4 hours ago at (telemetry_index - 5 + 24) % 24, 12 hours ago at (telemetry_index - 13 + 24) % 24
-  if (isnan(current_pressure) || current_pressure == 0.0f) return;
+  if (!telemFloatIsValid(current_pressure) || current_pressure == 0.0f) return;
   int idx_4h = (telemetry_index - 5 + 24) % 24;
   float pressure_4h = pressure_readings[idx_4h];
-  if (!isnan(pressure_4h) && pressure_4h != 0.0f) change_4h = current_pressure - pressure_4h;
+  if (telemFloatIsValid(pressure_4h) && pressure_4h != 0.0f) change_4h = current_pressure - pressure_4h;
   int idx_12h = (telemetry_index - 13 + 24) % 24;
   float pressure_12h = pressure_readings[idx_12h];
-  if (!isnan(pressure_12h) && pressure_12h != 0.0f) change_12h = current_pressure - pressure_12h;
+  if (telemFloatIsValid(pressure_12h) && pressure_12h != 0.0f) change_12h = current_pressure - pressure_12h;
 }
 
 void MyMesh::sendTelemetryMessage() {
@@ -1507,26 +1533,31 @@ void MyMesh::sendTelemetryMessage() {
     MESH_DEBUG_PRINTLN("Failed to initialize telemetry channel");
     return;
   }
-  float current_temp = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE);
-  float current_pressure = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE);
-  float current_humidity = getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_RELATIVE_HUMIDITY);
+  bool has_temp = hasTelemEntry(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE);
+  bool has_pressure = hasTelemEntry(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE);
+  bool has_humidity = hasTelemEntry(telemetry, TELEM_CHANNEL_SELF, LPP_RELATIVE_HUMIDITY);
+  float current_temp = has_temp ? getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE) : NAN;
+  float current_pressure = has_pressure ? getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE) : NAN;
+  float current_humidity = has_humidity ? getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_RELATIVE_HUMIDITY) : NAN;
   float batt_voltage = (float)board.getBattMilliVolts() / 1000.0f;
   char hum_suffix[16];
-  if (!isnan(current_humidity) && current_humidity >= 0.0f && current_humidity <= 100.0f) {
+  if (has_humidity && telemFloatIsValid(current_humidity) &&
+      current_humidity >= 0.0f && current_humidity <= 100.0f) {
     sprintf(hum_suffix, " H=%.1f%%", current_humidity);
   } else {
     hum_suffix[0] = '\0';
   }
   uint32_t current_sent = getNumSentFlood() + getNumSentDirect();
   uint32_t repeated_packets = (last_sent_packets_count > 0) ? (current_sent - last_sent_packets_count) : 0;
-  float temp_min, temp_max, pressure_min, pressure_max;
-  calcMinMax24h(temp_min, temp_max, pressure_min, pressure_max);
-  float pressure_change_4h, pressure_change_12h;
-  calcPressureChanges(current_pressure, pressure_change_4h, pressure_change_12h);
   char msg[160];
-  if (!isnan(current_temp) && !isnan(current_pressure)) {
-    bool has_temp_minmax = !isnan(temp_min) && !isnan(temp_max);
-    bool has_pressure_changes = !isnan(pressure_change_4h) && !isnan(pressure_change_12h);
+  if (has_temp && has_pressure &&
+      telemFloatIsValid(current_temp) && telemFloatIsValid(current_pressure)) {
+    float temp_min, temp_max, pressure_min, pressure_max;
+    calcMinMax24h(temp_min, temp_max, pressure_min, pressure_max);
+    float pressure_change_4h, pressure_change_12h;
+    calcPressureChanges(current_pressure, pressure_change_4h, pressure_change_12h);
+    bool has_temp_minmax = telemFloatIsValid(temp_min) && telemFloatIsValid(temp_max);
+    bool has_pressure_changes = telemFloatIsValid(pressure_change_4h) && telemFloatIsValid(pressure_change_12h);
     if (has_temp_minmax && has_pressure_changes) {
       sprintf(msg, "%s: T=%.1f°C (min:%.1f max:%.1f) P=%.1fhPa (Δ4h:%+.1f Δ12h:%+.1f) V=%.2fV R=%lu%s",
               _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
@@ -1541,7 +1572,7 @@ void MyMesh::sendTelemetryMessage() {
               _prefs.node_name, current_temp, current_pressure, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
     }
   } else {
-    sprintf(msg, "%s: No sensor data V=%.2fV R=%lu%s", _prefs.node_name, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+    sprintf(msg, "%s: V=%.2fV R=%lu%s", _prefs.node_name, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
   }
   uint32_t timestamp = getRTCClock()->getCurrentTime();
   uint8_t temp[5 + MAX_TEXT_LEN + 32];
