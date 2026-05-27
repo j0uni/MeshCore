@@ -1326,7 +1326,12 @@ void MyMesh::loop() {
 
   // Periodic telemetry: first send 30s after boot, then every 2 hours
   uint32_t current_time = getRTCClock()->getCurrentTime();
-  if (last_telemetry_send == 0 || current_time >= last_telemetry_send + 3600) {
+  const char* node_name = _prefs.node_name;
+  size_t node_name_len = strlen(node_name);
+  const bool telemetry_disabled_by_name =
+      node_name_len >= 3 && strcmp(node_name + node_name_len - 3, " nt") == 0;
+  if (!telemetry_disabled_by_name &&
+      (last_telemetry_send == 0 || current_time >= last_telemetry_send + 3600)) {
     telemetry.reset();
     telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
     sensors.querySensors(0xFF, telemetry);
