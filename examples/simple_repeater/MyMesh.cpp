@@ -1589,7 +1589,7 @@ void MyMesh::sendTelemetryMessage() {
   temp[5 + text_len] = 0;
   auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, telemetry_channel, temp, 5 + text_len);
   if (pkt) {
-    sendFlood(pkt);
+    sendFlood(pkt, 0, _prefs.path_hash_mode + 1);
     MESH_DEBUG_PRINTLN("Sent telemetry: %s", msg);
   } else {
     MESH_DEBUG_PRINTLN("Failed to create telemetry packet");
