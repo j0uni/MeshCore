@@ -88,7 +88,24 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
     file.read((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
     file.read((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));              // 290
-    // next: 291
+    _prefs->prefs_format_version = 0;
+    _prefs->flood_advert_interval_mins = 0;
+    if (file.available() >= (int)sizeof(_prefs->prefs_format_version)) {
+      file.read((uint8_t *)&_prefs->prefs_format_version, sizeof(_prefs->prefs_format_version)); // 291
+    }
+    if (file.available() >= (int)sizeof(_prefs->flood_advert_interval_mins)) {
+      file.read((uint8_t *)&_prefs->flood_advert_interval_mins, sizeof(_prefs->flood_advert_interval_mins)); // 292
+    }
+    if (_prefs->prefs_format_version < 1) {
+      if (_prefs->advert_interval > 0) {
+        uint32_t mins = (uint32_t)_prefs->advert_interval * 2;
+        _prefs->advert_interval = (uint8_t)(mins > MAX_LOCAL_ADVERT_INTERVAL ? MAX_LOCAL_ADVERT_INTERVAL : mins);
+      }
+      if (_prefs->flood_advert_interval > 0) {
+        _prefs->flood_advert_interval_mins = (uint16_t)_prefs->flood_advert_interval * 60;
+      }
+      _prefs->prefs_format_version = 1;
+    }
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -179,17 +196,17 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
     file.write((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
     file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));              // 290
-    // next: 291
+    _prefs->prefs_format_version = 1;
+    file.write((uint8_t *)&_prefs->prefs_format_version, sizeof(_prefs->prefs_format_version));   // 291
+    file.write((uint8_t *)&_prefs->flood_advert_interval_mins, sizeof(_prefs->flood_advert_interval_mins)); // 292
 
     file.close();
   }
 }
 
-#define MIN_LOCAL_ADVERT_INTERVAL   60
-
 void CommonCLI::savePrefs() {
-  if (_prefs->advert_interval * 2 < MIN_LOCAL_ADVERT_INTERVAL) {
-    _prefs->advert_interval = 0;  // turn it off, now that device has been manually configured
+  if (_prefs->advert_interval > 0 && _prefs->advert_interval < MIN_LOCAL_ADVERT_INTERVAL) {
+    _prefs->advert_interval = 0;
   }
   _callbacks->savePrefs();
 }
@@ -497,21 +514,24 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     savePrefs();
     strcpy(reply, "OK");
   } else if (memcmp(config, "flood.advert.interval ", 22) == 0) {
-    int hours = _atoi(&config[22]);
-    if ((hours > 0 && hours < 3) || (hours > 168)) {
-      strcpy(reply, "Error: interval range is 3-168 hours");
+    int mins = _atoi(&config[22]);
+    if ((mins > 0 && mins < MIN_FLOOD_ADVERT_INTERVAL) || (mins > MAX_FLOOD_ADVERT_INTERVAL)) {
+      sprintf(reply, "Error: interval range is %d-%d minutes", MIN_FLOOD_ADVERT_INTERVAL, MAX_FLOOD_ADVERT_INTERVAL);
     } else {
-      _prefs->flood_advert_interval = (uint8_t)(hours);
+      _prefs->flood_advert_interval_mins = (uint16_t)mins;
+      _prefs->flood_advert_interval = mins > 0 ? (uint8_t)((mins + 59) / 60) : 0;
+      _prefs->prefs_format_version = 1;
       _callbacks->updateFloodAdvertTimer();
       savePrefs();
       strcpy(reply, "OK");
     }
   } else if (memcmp(config, "advert.interval ", 16) == 0) {
     int mins = _atoi(&config[16]);
-    if ((mins > 0 && mins < MIN_LOCAL_ADVERT_INTERVAL) || (mins > 240)) {
-      sprintf(reply, "Error: interval range is %d-240 minutes", MIN_LOCAL_ADVERT_INTERVAL);
+    if ((mins > 0 && mins < MIN_LOCAL_ADVERT_INTERVAL) || (mins > MAX_LOCAL_ADVERT_INTERVAL)) {
+      sprintf(reply, "Error: interval range is %d-%d minutes", MIN_LOCAL_ADVERT_INTERVAL, MAX_LOCAL_ADVERT_INTERVAL);
     } else {
-      _prefs->advert_interval = (uint8_t)(mins / 2);
+      _prefs->advert_interval = (uint8_t)mins;
+      _prefs->prefs_format_version = 1;
       _callbacks->updateAdvertTimer();
       savePrefs();
       strcpy(reply, "OK");
@@ -748,9 +768,13 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "allow.read.only", 15) == 0) {
     sprintf(reply, "> %s", _prefs->allow_read_only ? "on" : "off");
   } else if (memcmp(config, "flood.advert.interval", 21) == 0) {
-    sprintf(reply, "> %d", ((uint32_t) _prefs->flood_advert_interval));
+    uint32_t mins = _prefs->flood_advert_interval_mins;
+    if (mins == 0 && _prefs->flood_advert_interval > 0) {
+      mins = (uint32_t)_prefs->flood_advert_interval * 60;
+    }
+    sprintf(reply, "> %lu", (unsigned long)mins);
   } else if (memcmp(config, "advert.interval", 15) == 0) {
-    sprintf(reply, "> %d", ((uint32_t) _prefs->advert_interval) * 2);
+    sprintf(reply, "> %d", (int)_prefs->advert_interval);
   } else if (memcmp(config, "guest.password", 14) == 0) {
     sprintf(reply, "> %s", _prefs->guest_password);
   } else if (sender_timestamp == 0 && memcmp(config, "prv.key", 7) == 0) {  // from serial command line only

@@ -28,6 +28,31 @@ static unsigned long userBtnDownAt = 0;
 #define USER_BTN_HOLD_OFF_MILLIS 1500
 #endif
 
+#if defined(T1000_E) && defined(PIN_USER_BTN)
+#ifndef USER_BTN_PRESSED
+#define USER_BTN_PRESSED HIGH
+#endif
+#ifndef T1000E_USER_BTN_HOLD_POWEROFF_MS
+#define T1000E_USER_BTN_HOLD_POWEROFF_MS 1500ul
+#endif
+static unsigned long t1000e_power_btn_down_at = 0;
+#if defined(PIN_BUZZER)
+/** Three descending tones immediately before SYSTEMOFF (long-press shutdown). */
+static void t1000ePlayShutdownJingle(int pin) {
+#ifdef PIN_BUZZER_EN
+  digitalWrite(PIN_BUZZER_EN, HIGH);
+#endif
+  const int hz[] = { 784, 523, 392 };
+  const unsigned dur_ms = 120;
+  for (size_t i = 0; i < sizeof(hz) / sizeof(hz[0]); i++) {
+    tone(pin, hz[i], dur_ms);
+    delay(dur_ms + 35);
+  }
+  noTone(pin);
+}
+#endif
+#endif
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -144,6 +169,27 @@ void loop() {
     }
   } else {
     userBtnDownAt = 0;
+  }
+#endif
+
+#if defined(T1000_E) && defined(PIN_USER_BTN)
+  /* Long press: SYSTEMOFF via board.powerOff() (GNSS/rails off, wake on user button). */
+  {
+    int st = digitalRead(PIN_USER_BTN);
+    if (st == USER_BTN_PRESSED) {
+      if (t1000e_power_btn_down_at == 0) {
+        t1000e_power_btn_down_at = millis();
+      } else if ((unsigned long)(millis() - t1000e_power_btn_down_at) >= T1000E_USER_BTN_HOLD_POWEROFF_MS) {
+        Serial.println(F("Powering off (long press)..."));
+        Serial.flush();
+#ifdef PIN_BUZZER
+        t1000ePlayShutdownJingle(PIN_BUZZER);
+#endif
+        board.powerOff();  // does not return
+      }
+    } else {
+      t1000e_power_btn_down_at = 0;
+    }
   }
 #endif
 

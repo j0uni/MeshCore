@@ -49,45 +49,5 @@ public:
     return 0;
   }
 
-  void powerOff() override {
-    #ifdef HAS_GPS
-        digitalWrite(GPS_VRTC_EN, LOW);
-        digitalWrite(GPS_RESET, LOW);
-        digitalWrite(GPS_SLEEP_INT, LOW);
-        digitalWrite(GPS_RTC_INT, LOW);
-        digitalWrite(GPS_EN, LOW);
-    #endif
-
-    #ifdef BUZZER_EN
-        digitalWrite(BUZZER_EN, LOW);
-    #endif
-
-    #ifdef PIN_3V3_EN
-        digitalWrite(PIN_3V3_EN, LOW);
-    #endif
-
-    #ifdef PIN_3V3_ACC_EN
-        digitalWrite(PIN_3V3_ACC_EN, LOW);
-    #endif
-    #ifdef SENSOR_EN
-        digitalWrite(SENSOR_EN, LOW);
-    #endif
-
-    // set led on and wait for button release before poweroff
-    #ifdef LED_PIN
-    digitalWrite(LED_PIN, HIGH);
-    #endif
-    #ifdef BUTTON_PIN
-    while(digitalRead(BUTTON_PIN));
-    #endif
-    #ifdef LED_PIN
-    digitalWrite(LED_PIN, LOW);
-    #endif
-
-    #ifdef BUTTON_PIN
-    nrf_gpio_cfg_sense_input(BUTTON_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
-    #endif
-
-    sd_power_system_off();
-  }
+  void powerOff() override;
 };

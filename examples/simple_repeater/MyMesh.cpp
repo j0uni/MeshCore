@@ -895,8 +895,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.bw = LORA_BW;
   _prefs.cr = LORA_CR;
   _prefs.tx_power_dbm = LORA_TX_POWER;
-  _prefs.advert_interval = 1;        // default to 2 minutes for NEW installs
-  _prefs.flood_advert_interval = 12; // 12 hours
+  _prefs.advert_interval = 2;        // default to 2 minutes for NEW installs
+  _prefs.flood_advert_interval = 12; // legacy hours field (12h)
+  _prefs.flood_advert_interval_mins = 12 * 60;
+  _prefs.prefs_format_version = 1;
   _prefs.flood_max = 64;
   _prefs.interference_threshold = 0; // disabled
 
@@ -1043,16 +1045,18 @@ void MyMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
 }
 
 void MyMesh::updateAdvertTimer() {
-  if (_prefs.advert_interval > 0) { // schedule local advert timer
-    next_local_advert = futureMillis(((uint32_t)_prefs.advert_interval) * 2 * 60 * 1000);
+  uint32_t interval = nodePrefsLocalAdvertMillis(&_prefs);
+  if (interval > 0) {
+    next_local_advert = futureMillis(interval);
   } else {
     next_local_advert = 0; // stop the timer
   }
 }
 
 void MyMesh::updateFloodAdvertTimer() {
-  if (_prefs.flood_advert_interval > 0) { // schedule flood advert timer
-    next_flood_advert = futureMillis(((uint32_t)_prefs.flood_advert_interval) * 60 * 60 * 1000);
+  uint32_t interval = nodePrefsFloodAdvertMillis(&_prefs);
+  if (interval > 0) {
+    next_flood_advert = futureMillis(interval);
   } else {
     next_flood_advert = 0; // stop the timer
   }
@@ -1544,19 +1548,29 @@ void MyMesh::sendTelemetryMessage() {
   float current_temp = has_temp ? getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_TEMPERATURE) : NAN;
   float current_pressure = has_pressure ? getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_BAROMETRIC_PRESSURE) : NAN;
   float current_humidity = has_humidity ? getTelemValue(telemetry, TELEM_CHANNEL_SELF, LPP_RELATIVE_HUMIDITY) : NAN;
+  const bool has_env_temp = has_temp && telemFloatIsValid(current_temp);
+  float mcu_temp = board.getMCUTemperature();
+  const bool has_mcu_temp = !has_env_temp && telemFloatIsValid(mcu_temp);
+  const char* temp_key = has_mcu_temp ? "TC" : "T";
+  const float display_temp = has_env_temp ? current_temp : (has_mcu_temp ? mcu_temp : NAN);
+  const bool has_display_temp = has_env_temp || has_mcu_temp;
+  const bool has_valid_pressure = has_pressure && telemFloatIsValid(current_pressure);
   float batt_voltage = (float)board.getBattMilliVolts() / 1000.0f;
-  char hum_suffix[16];
+  char extras_suffix[32];
+  extras_suffix[0] = '\0';
+  int extras_len = 0;
   if (has_humidity && telemFloatIsValid(current_humidity) &&
       current_humidity >= 0.0f && current_humidity <= 100.0f) {
-    sprintf(hum_suffix, " H=%.1f%%", current_humidity);
-  } else {
-    hum_suffix[0] = '\0';
+    extras_len += sprintf(extras_suffix + extras_len, " H=%.1f%%", current_humidity);
+  }
+  float modem_temp = radio_driver.getModemTemperature();
+  if (telemFloatIsValid(modem_temp)) {
+    sprintf(extras_suffix + extras_len, " TM=%.1f°C", modem_temp);
   }
   uint32_t current_sent = getNumSentFlood() + getNumSentDirect();
   uint32_t repeated_packets = (last_sent_packets_count > 0) ? (current_sent - last_sent_packets_count) : 0;
   char msg[160];
-  if (has_temp && has_pressure &&
-      telemFloatIsValid(current_temp) && telemFloatIsValid(current_pressure)) {
+  if (has_display_temp && has_valid_pressure && has_env_temp) {
     float temp_min, temp_max, pressure_min, pressure_max;
     calcMinMax24h(temp_min, temp_max, pressure_min, pressure_max);
     float pressure_change_4h, pressure_change_12h;
@@ -1565,19 +1579,35 @@ void MyMesh::sendTelemetryMessage() {
     bool has_pressure_changes = telemFloatIsValid(pressure_change_4h) && telemFloatIsValid(pressure_change_12h);
     if (has_temp_minmax && has_pressure_changes) {
       sprintf(msg, "%s: T=%.1f°C (min:%.1f max:%.1f) P=%.1fhPa (Δ4h:%+.1f Δ12h:%+.1f) V=%.2fV R=%lu%s",
-              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, extras_suffix);
     } else if (has_temp_minmax) {
       sprintf(msg, "%s: T=%.1f°C (min:%.1f max:%.1f) P=%.1fhPa V=%.2fV R=%lu%s",
-              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+              _prefs.node_name, current_temp, temp_min, temp_max, current_pressure, batt_voltage, (unsigned long)repeated_packets, extras_suffix);
     } else if (has_pressure_changes) {
       sprintf(msg, "%s: T=%.1f°C P=%.1fhPa (Δ4h:%+.1f Δ12h:%+.1f) V=%.2fV R=%lu%s",
-              _prefs.node_name, current_temp, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+              _prefs.node_name, current_temp, current_pressure, pressure_change_4h, pressure_change_12h, batt_voltage, (unsigned long)repeated_packets, extras_suffix);
     } else {
       sprintf(msg, "%s: T=%.1f°C P=%.1fhPa V=%.2fV R=%lu%s",
-              _prefs.node_name, current_temp, current_pressure, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+              _prefs.node_name, current_temp, current_pressure, batt_voltage, (unsigned long)repeated_packets, extras_suffix);
     }
+  } else if (has_display_temp && has_valid_pressure) {
+    sprintf(msg, "%s: %s=%.1f°C P=%.1fhPa V=%.2fV R=%lu%s",
+            _prefs.node_name, temp_key, display_temp, current_pressure, batt_voltage, (unsigned long)repeated_packets, extras_suffix);
+  } else if (has_display_temp) {
+    sprintf(msg, "%s: %s=%.1f°C V=%.2fV R=%lu%s",
+            _prefs.node_name, temp_key, display_temp, batt_voltage, (unsigned long)repeated_packets, extras_suffix);
+  } else if (has_valid_pressure) {
+    sprintf(msg, "%s: P=%.1fhPa V=%.2fV R=%lu%s",
+            _prefs.node_name, current_pressure, batt_voltage, (unsigned long)repeated_packets, extras_suffix);
   } else {
-    sprintf(msg, "%s: V=%.2fV R=%lu%s", _prefs.node_name, batt_voltage, (unsigned long)repeated_packets, hum_suffix);
+    sprintf(msg, "%s: V=%.2fV R=%lu%s", _prefs.node_name, batt_voltage, (unsigned long)repeated_packets, extras_suffix);
+  }
+  uint8_t freq_err[3], xta_trim, xtb_trim;
+  if (radio_driver.getModemRegRaw(freq_err, &xta_trim, &xtb_trim)) {
+    int n = strlen(msg);
+    if (n < (int)sizeof(msg) - 24) {
+      sprintf(msg + n, " %u/%u/%u/%u/%u", freq_err[0], freq_err[1], freq_err[2], xta_trim, xtb_trim);
+    }
   }
   uint32_t timestamp = getRTCClock()->getCurrentTime();
   uint8_t temp[5 + MAX_TEXT_LEN + 32];
@@ -1589,7 +1619,7 @@ void MyMesh::sendTelemetryMessage() {
   temp[5 + text_len] = 0;
   auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, telemetry_channel, temp, 5 + text_len);
   if (pkt) {
-    sendFlood(pkt, 0, _prefs.path_hash_mode + 1);
+    sendFlood(pkt, (uint32_t)0, _prefs.path_hash_mode + 1);
     MESH_DEBUG_PRINTLN("Sent telemetry: %s", msg);
   } else {
     MESH_DEBUG_PRINTLN("Failed to create telemetry packet");

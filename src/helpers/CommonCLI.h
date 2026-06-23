@@ -19,6 +19,11 @@
 #define LOOP_DETECT_MODERATE  2
 #define LOOP_DETECT_STRICT    3
 
+#define MIN_LOCAL_ADVERT_INTERVAL   1
+#define MAX_LOCAL_ADVERT_INTERVAL   240
+#define MIN_FLOOD_ADVERT_INTERVAL   1
+#define MAX_FLOOD_ADVERT_INTERVAL   10080   // 168 hours in minutes
+
 struct NodePrefs { // persisted to file
   float airtime_factor;
   char node_name[32];
@@ -27,8 +32,8 @@ struct NodePrefs { // persisted to file
   float freq;
   int8_t tx_power_dbm;
   uint8_t disable_fwd;
-  uint8_t advert_interval;       // minutes / 2
-  uint8_t flood_advert_interval; // hours
+  uint8_t advert_interval;       // minutes (local / zero-hop advert)
+  uint8_t flood_advert_interval; // legacy hours (kept for file layout compat)
   float rx_delay_base;
   float tx_delay_factor;
   char guest_password[16];
@@ -61,7 +66,21 @@ struct NodePrefs { // persisted to file
   uint8_t rx_boosted_gain; // power settings
   uint8_t path_hash_mode;   // which path mode to use when sending
   uint8_t loop_detect;
+  uint8_t prefs_format_version;       // 0 = legacy on-disk, 1 = minute-based advert prefs
+  uint16_t flood_advert_interval_mins; // flood advert period in minutes (0 = off)
 };
+
+inline uint32_t nodePrefsLocalAdvertMillis(const NodePrefs* p) {
+  return p->advert_interval > 0 ? (uint32_t)p->advert_interval * 60UL * 1000UL : 0;
+}
+
+inline uint32_t nodePrefsFloodAdvertMillis(const NodePrefs* p) {
+  uint32_t mins = p->flood_advert_interval_mins;
+  if (mins == 0 && p->flood_advert_interval > 0) {
+    mins = (uint32_t)p->flood_advert_interval * 60;
+  }
+  return mins > 0 ? mins * 60UL * 1000UL : 0;
+}
 
 class CommonCLICallbacks {
 public:

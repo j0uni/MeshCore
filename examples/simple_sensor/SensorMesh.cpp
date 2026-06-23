@@ -721,8 +721,10 @@ SensorMesh::SensorMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::Millise
   _prefs.bw = LORA_BW;
   _prefs.cr = LORA_CR;
   _prefs.tx_power_dbm = LORA_TX_POWER;
-  _prefs.advert_interval = 1;  // default to 2 minutes for NEW installs
+  _prefs.advert_interval = 2;  // default to 2 minutes for NEW installs
   _prefs.flood_advert_interval = 0;   // disabled
+  _prefs.flood_advert_interval_mins = 0;
+  _prefs.prefs_format_version = 1;
   _prefs.disable_fwd = true;
   _prefs.flood_max = 64;
   _prefs.interference_threshold = 0;  // disabled
@@ -827,15 +829,17 @@ void SensorMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
 }
 
 void SensorMesh::updateAdvertTimer() {
-  if (_prefs.advert_interval > 0) {  // schedule local advert timer
-    next_local_advert = futureMillis( ((uint32_t)_prefs.advert_interval) * 2 * 60 * 1000);
+  uint32_t interval = nodePrefsLocalAdvertMillis(&_prefs);
+  if (interval > 0) {
+    next_local_advert = futureMillis(interval);
   } else {
     next_local_advert = 0;  // stop the timer
   }
 }
 void SensorMesh::updateFloodAdvertTimer() {
-  if (_prefs.flood_advert_interval > 0) {  // schedule flood advert timer
-    next_flood_advert = futureMillis( ((uint32_t)_prefs.flood_advert_interval) * 60 * 60 * 1000);
+  uint32_t interval = nodePrefsFloodAdvertMillis(&_prefs);
+  if (interval > 0) {
+    next_flood_advert = futureMillis(interval);
   } else {
     next_flood_advert = 0;  // stop the timer
   }
