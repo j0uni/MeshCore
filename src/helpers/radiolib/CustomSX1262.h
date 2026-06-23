@@ -98,20 +98,12 @@ class CustomSX1262 : public SX1262 {
       return (rxGain == RADIOLIB_SX126X_RX_GAIN_BOOSTED);
     }
 
-    // Undocumented die-temperature register; value is signed °C.
-    float getModemTemperature() {
-      uint8_t raw = 0;
-      if (readRegister(0x096C, &raw, 1) != RADIOLIB_ERR_NONE) return NAN;
-      float temp = (int8_t)raw;
-      if (temp < -55.0f || temp > 125.0f) return NAN;
-      return temp;
-    }
-
-    // Raw modem registers for telemetry: 0x076B..D freq error, 0x0911/12 crystal trim.
-    bool getModemRegRaw(uint8_t freq_err[3], uint8_t* xta_trim, uint8_t* xtb_trim) {
+    // Raw modem registers for telemetry: 0x076B..D freq error, 0x0911/12 crystal trim, 0x096C probe.
+    bool getModemRegRaw(uint8_t freq_err[3], uint8_t* xta_trim, uint8_t* xtb_trim, uint8_t* reg_096c) {
       if (readRegister(RADIOLIB_SX126X_REG_FREQ_ERROR_RX_CRC, freq_err, 3) != RADIOLIB_ERR_NONE) return false;
       if (readRegister(RADIOLIB_SX126X_REG_XTA_TRIM, xta_trim, 1) != RADIOLIB_ERR_NONE) return false;
       if (readRegister(RADIOLIB_SX126X_REG_XTB_TRIM, xtb_trim, 1) != RADIOLIB_ERR_NONE) return false;
+      if (readRegister(0x096C, reg_096c, 1) != RADIOLIB_ERR_NONE) return false;
       return true;
     }
 };

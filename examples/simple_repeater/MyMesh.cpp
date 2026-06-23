@@ -1563,10 +1563,6 @@ void MyMesh::sendTelemetryMessage() {
       current_humidity >= 0.0f && current_humidity <= 100.0f) {
     extras_len += sprintf(extras_suffix + extras_len, " H=%.1f%%", current_humidity);
   }
-  float modem_temp = radio_driver.getModemTemperature();
-  if (telemFloatIsValid(modem_temp)) {
-    sprintf(extras_suffix + extras_len, " TM=%.1f°C", modem_temp);
-  }
   uint32_t current_sent = getNumSentFlood() + getNumSentDirect();
   uint32_t repeated_packets = (last_sent_packets_count > 0) ? (current_sent - last_sent_packets_count) : 0;
   char msg[160];
@@ -1602,11 +1598,11 @@ void MyMesh::sendTelemetryMessage() {
   } else {
     sprintf(msg, "%s: V=%.2fV R=%lu%s", _prefs.node_name, batt_voltage, (unsigned long)repeated_packets, extras_suffix);
   }
-  uint8_t freq_err[3], xta_trim, xtb_trim;
-  if (radio_driver.getModemRegRaw(freq_err, &xta_trim, &xtb_trim)) {
+  uint8_t freq_err[3], xta_trim, xtb_trim, reg_096c;
+  if (radio_driver.getModemRegRaw(freq_err, &xta_trim, &xtb_trim, &reg_096c)) {
     int n = strlen(msg);
-    if (n < (int)sizeof(msg) - 24) {
-      sprintf(msg + n, " %u/%u/%u/%u/%u", freq_err[0], freq_err[1], freq_err[2], xta_trim, xtb_trim);
+    if (n < (int)sizeof(msg) - 28) {
+      sprintf(msg + n, " %u/%u/%u/%u/%u/%u", freq_err[0], freq_err[1], freq_err[2], xta_trim, xtb_trim, reg_096c);
     }
   }
   uint32_t timestamp = getRTCClock()->getCurrentTime();

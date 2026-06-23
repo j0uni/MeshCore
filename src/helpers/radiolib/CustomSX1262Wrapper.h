@@ -37,11 +37,7 @@ public:
     return ((CustomSX1262 *)_radio)->getRxBoostedGainMode();
   }
 
-  float getModemTemperature() override {
-    return ((CustomSX1262 *)_radio)->getModemTemperature();
-  }
-
-  bool getModemRegRaw(uint8_t freq_err[3], uint8_t* xta_trim, uint8_t* xtb_trim) override {
-    return ((CustomSX1262 *)_radio)->getModemRegRaw(freq_err, xta_trim, xtb_trim);
+  bool getModemRegRaw(uint8_t freq_err[3], uint8_t* xta_trim, uint8_t* xtb_trim, uint8_t* reg_096c) override {
+    return ((CustomSX1262 *)_radio)->getModemRegRaw(freq_err, xta_trim, xtb_trim, reg_096c);
   }
 };

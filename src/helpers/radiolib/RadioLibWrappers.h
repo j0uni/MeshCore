@@ -58,10 +58,8 @@ public:
   virtual void setRxBoostedGainMode(bool) { }
   virtual bool getRxBoostedGainMode() const { return false; }
 
-  virtual float getModemTemperature() { return NAN; }
-
-  virtual bool getModemRegRaw(uint8_t freq_err[3], uint8_t* xta_trim, uint8_t* xtb_trim) {
-    (void)freq_err; (void)xta_trim; (void)xtb_trim;
+  virtual bool getModemRegRaw(uint8_t freq_err[3], uint8_t* xta_trim, uint8_t* xtb_trim, uint8_t* reg_096c) {
+    (void)freq_err; (void)xta_trim; (void)xtb_trim; (void)reg_096c;
     return false;
   }
 };
